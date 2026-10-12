@@ -31,6 +31,9 @@ windows = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_Media", "Win32_System_SystemInformation",
 ] }
 
+[build-dependencies]
+embed-resource = "3"
+
 # Differential test oracle only; never linked into the exe.
 [dev-dependencies]
 rrule = "0.13"

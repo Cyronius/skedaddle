@@ -10,7 +10,7 @@ It reads your calendar from a standard iCalendar (`.ics`) feed, so it works with
 
 | | Skedaddle |
 |---|---|
-| Download | **one 0.9 MB exe**, no installer, no dependencies |
+| Download | **one 0.95 MB exe**, no installer, no dependencies |
 | RAM in the tray | **about 2.5 MB** (private memory, measured) |
 | CPU when idle | **0%**: no polling loop; it wakes only for a feed sync or an alert |
 | Runtime | none: no Electron, no browser engine, no .NET, no background service |
@@ -36,7 +36,16 @@ It is written in Rust against the plain Win32 API and draws its own UI with GDI.
 
 ## Install
 
-There are no prebuilt downloads yet. Build from source:
+1. Download `skedaddle.exe` from the [latest release](https://github.com/Cyronius/skedaddle/releases/latest).
+2. Put it anywhere, for example `%LOCALAPPDATA%\Programs\Skedaddle\`.
+3. Run it. On first start, Skedaddle creates its config file and opens it in Notepad.
+4. Right-click the tray icon and select **Start with Windows**, if you want it to start at sign-in.
+
+The exe is not code-signed yet, so Windows SmartScreen can show "Windows protected your PC" on the first run. Select **More info → Run anyway**. Each release also has a `skedaddle.exe.sha256` file if you want to check the download.
+
+To uninstall: untick **Start with Windows**, select **Quit**, then delete the exe and the `%APPDATA%\skedaddle` and `%LOCALAPPDATA%\skedaddle` folders.
+
+### Build from source
 
 1. Install Rust from [rustup.rs](https://rustup.rs).
 2. Clone and build:
@@ -48,8 +57,6 @@ There are no prebuilt downloads yet. Build from source:
    ```
 
 3. Run `target\release\skedaddle.exe`.
-
-On first start, Skedaddle creates its config file and opens it in Notepad.
 
 ## Connect your calendar
 

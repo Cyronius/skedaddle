@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - name: Report exe size
+        shell: pwsh
+        run: |
+          $s = (Get-Item target/release/skedaddle.exe).Length
+          "exe size: {0:N0} bytes ({1:N2} MiB)" -f $s, ($s / 1MB) | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append

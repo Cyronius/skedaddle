@@ -3,6 +3,7 @@ pub mod autostart;
 pub mod flash;
 pub mod gdi;
 pub mod icon;
+pub mod icon_art;
 pub mod modal;
 pub mod paths;
 pub mod shared;
