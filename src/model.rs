@@ -1,5 +1,4 @@
-use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
-pub use rrule::Tz;
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, TimeZone, Utc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rsvp {
@@ -15,8 +14,8 @@ pub struct Occurrence {
     pub feed: usize,
     pub uid: String,
     pub title: String,
-    pub start: DateTime<Tz>,
-    pub end: DateTime<Tz>,
+    pub start: DateTime<FixedOffset>,
+    pub end: DateTime<FixedOffset>,
     pub all_day: bool,
     pub location: String,
     pub description: String,
@@ -69,7 +68,7 @@ pub fn plain_text(html: &str) -> String {
     out.trim().to_string()
 }
 
-pub fn fmt_time(dt: &DateTime<Tz>, h24: bool) -> String {
+pub fn fmt_time(dt: &DateTime<FixedOffset>, h24: bool) -> String {
     if h24 {
         dt.format("%H:%M").to_string()
     } else {

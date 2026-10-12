@@ -6,10 +6,15 @@ use skedaddle::config::{parse_color, Config, FeedCfg, TEMPLATE};
 use skedaddle::expand::{expand, FeedMeta};
 use skedaddle::ical::{parse, parse_line, unescape, unfold};
 use skedaddle::join::find_join_url;
-use skedaddle::model::{Occurrence, Rsvp, Tz};
+use skedaddle::model::{Occurrence, Rsvp};
+use skedaddle::tz::{feed_zones, Zone};
 
 const FEED: &str = include_str!("fixtures/google-like.ics");
-const NY: Tz = Tz::America__New_York;
+
+/// Display zone taken from the fixture's own VTIMEZONE, so results do not depend on the PC's zone.
+fn ny() -> Zone {
+    feed_zones(&parse(FEED))["America/New_York"].clone()
+}
 
 fn utc(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, m, d, h, mi, s).unwrap()
@@ -18,7 +23,7 @@ fn utc(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
 fn load() -> Vec<Occurrence> {
     let cal = parse(FEED);
     let meta = FeedMeta { index: 0, owner_email: Some("me@example.com") };
-    expand(&cal, &meta, NY, utc(2026, 1, 1, 0, 0, 0), utc(2026, 4, 30, 0, 0, 0))
+    expand(&cal, &meta, &ny(), utc(2026, 1, 1, 0, 0, 0), utc(2026, 4, 30, 0, 0, 0))
 }
 
 fn local(o: &Occurrence) -> String {
@@ -87,7 +92,7 @@ fn cancelled_event_is_dropped() {
 fn window_limits_expansion() {
     let cal = parse(FEED);
     let meta = FeedMeta { index: 0, owner_email: None };
-    let v = expand(&cal, &meta, NY, utc(2026, 2, 8, 0, 0, 0), utc(2026, 2, 15, 0, 0, 0));
+    let v = expand(&cal, &meta, &ny(), utc(2026, 2, 8, 0, 0, 0), utc(2026, 2, 15, 0, 0, 0));
     let titles: Vec<&str> = v.iter().map(|o| o.title.as_str()).collect();
     assert_eq!(titles, vec!["Standup", "Offsite", "Vendor call"]);
 }
@@ -217,7 +222,7 @@ fn weekly_all_day_series_with_date_until_expands_in_local_zone() {
     let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:ooo\nSUMMARY:Out\nDTSTART;VALUE=DATE:20260302\nDTEND;VALUE=DATE:20260303\nRRULE:FREQ=WEEKLY;UNTIL=20260316\nEND:VEVENT\nEND:VCALENDAR\n";
     let cal = parse(ics);
     let meta = FeedMeta { index: 0, owner_email: None };
-    let v = expand(&cal, &meta, Tz::LOCAL, utc(2026, 2, 20, 0, 0, 0), utc(2026, 4, 1, 0, 0, 0));
+    let v = expand(&cal, &meta, &Zone::Local, utc(2026, 2, 20, 0, 0, 0), utc(2026, 4, 1, 0, 0, 0));
     let days: Vec<String> = v.iter().map(|o| o.start.format("%Y-%m-%d").to_string()).collect();
     assert_eq!(days, vec!["2026-03-02", "2026-03-09", "2026-03-16"]);
     assert!(v.iter().all(|o| o.all_day));

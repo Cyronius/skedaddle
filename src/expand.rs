@@ -1,24 +1,24 @@
-use std::collections::HashSet;
-use std::str::FromStr;
+use std::collections::{BTreeSet, HashSet};
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use rrule::RRuleSet;
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 
 use crate::ical::{Component, Prop};
 use crate::join::find_join_url;
-use crate::model::{plain_text, Occurrence, Rsvp, Tz};
+use crate::model::{plain_text, Occurrence, Rsvp};
+use crate::recur;
+use crate::tz::{system_zone, Zone, Zones};
 
 pub struct FeedMeta<'a> {
     pub index: usize,
     pub owner_email: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum IcalTime {
     Date(NaiveDate),
     Floating(NaiveDateTime),
     Utc(NaiveDateTime),
-    Zoned(NaiveDateTime, chrono_tz::Tz),
+    Zoned(NaiveDateTime, String),
 }
 
 fn parse_naive(v: &str) -> Option<(NaiveDateTime, bool)> {
@@ -42,10 +42,10 @@ pub fn parse_time_value(value: &str, tzid: Option<&str>, date_only: bool) -> Opt
     if z {
         return Some(IcalTime::Utc(n));
     }
-    match tzid.and_then(|t| chrono_tz::Tz::from_str(t).ok()) {
-        Some(tz) => Some(IcalTime::Zoned(n, tz)),
-        None => Some(IcalTime::Floating(n)),
-    }
+    Some(match tzid {
+        Some(t) => IcalTime::Zoned(n, t.to_string()),
+        None => IcalTime::Floating(n),
+    })
 }
 
 pub fn parse_time(p: &Prop) -> Option<IcalTime> {
@@ -53,32 +53,24 @@ pub fn parse_time(p: &Prop) -> Option<IcalTime> {
     parse_time_value(&p.value, p.param("TZID"), date_only)
 }
 
-fn resolve(n: NaiveDateTime, tz: &Tz) -> Option<DateTime<Tz>> {
-    tz.from_local_datetime(&n).earliest().or_else(|| tz.from_local_datetime(&(n + Duration::hours(1))).earliest())
-}
-
 impl IcalTime {
-    pub fn to_dt(self, display: &Tz) -> Option<DateTime<Tz>> {
+    fn local(&self) -> NaiveDateTime {
         match self {
-            IcalTime::Date(d) => resolve(d.and_hms_opt(0, 0, 0)?, display),
-            IcalTime::Floating(n) => resolve(n, display),
-            IcalTime::Utc(n) => Some(Utc.from_utc_datetime(&n).with_timezone(display)),
-            IcalTime::Zoned(n, z) => resolve(n, &Tz::from(z)).map(|d| d.with_timezone(display)),
+            IcalTime::Date(d) => d.and_hms_opt(0, 0, 0).unwrap(),
+            IcalTime::Floating(n) | IcalTime::Utc(n) | IcalTime::Zoned(n, _) => *n,
         }
     }
 
-    fn rrule_parts(self, display: &Tz) -> (String, String) {
-        const F: &str = "%Y%m%dT%H%M%S";
-        let floating = |n: NaiveDateTime| match display {
-            Tz::Tz(t) => (format!(";TZID={}", t.name()), n.format(F).to_string()),
-            _ => (String::new(), n.format(F).to_string()),
-        };
+    fn zone(&self, zones: &Zones) -> Zone {
         match self {
-            IcalTime::Date(d) => floating(d.and_hms_opt(0, 0, 0).unwrap()),
-            IcalTime::Floating(n) => floating(n),
-            IcalTime::Utc(n) => (String::new(), format!("{}Z", n.format(F))),
-            IcalTime::Zoned(n, z) => (format!(";TZID={}", z.name()), n.format(F).to_string()),
+            IcalTime::Date(_) | IcalTime::Floating(_) => zones.display.clone(),
+            IcalTime::Utc(_) => Zone::Fixed(0),
+            IcalTime::Zoned(_, id) => zones.get(id),
         }
+    }
+
+    fn to_utc(&self, zones: &Zones) -> NaiveDateTime {
+        self.zone(zones).to_utc(self.local())
     }
 }
 
@@ -114,27 +106,26 @@ fn parse_duration(v: &str) -> Option<Duration> {
 }
 
 struct Times {
-    start: DateTime<Tz>,
-    end: DateTime<Tz>,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
     all_day: bool,
 }
 
-fn event_times(ev: &Component, display: &Tz) -> Option<(Times, IcalTime)> {
+fn next_local_midnight(zones: &Zones, utc: NaiveDateTime, days: i64) -> NaiveDateTime {
+    let d = zones.display.to_local(utc).date() + Duration::days(days);
+    zones.display.to_utc(d.and_hms_opt(0, 0, 0).unwrap())
+}
+
+fn event_times(ev: &Component, zones: &Zones) -> Option<(Times, IcalTime)> {
     let raw = parse_time(ev.prop("DTSTART")?)?;
-    let start = raw.to_dt(display)?;
+    let start = raw.to_utc(zones);
     let all_day = matches!(raw, IcalTime::Date(_));
     let end = ev
         .prop("DTEND")
         .and_then(parse_time)
-        .and_then(|t| t.to_dt(display))
+        .map(|t| t.to_utc(zones))
         .or_else(|| ev.prop("DURATION").and_then(|p| parse_duration(&p.value)).map(|d| start + d))
-        .unwrap_or_else(|| {
-            if all_day {
-                resolve(start.naive_local() + Duration::days(1), display).unwrap_or(start)
-            } else {
-                start
-            }
-        });
+        .unwrap_or_else(|| if all_day { next_local_midnight(zones, start, 1) } else { start });
     Some((Times { start, end: end.max(start), all_day }, raw))
 }
 
@@ -160,7 +151,7 @@ fn is_cancelled(ev: &Component) -> bool {
     ev.text("STATUS").is_some_and(|s| s.eq_ignore_ascii_case("CANCELLED"))
 }
 
-fn build(ev: &Component, meta: &FeedMeta, start: DateTime<Tz>, end: DateTime<Tz>, all_day: bool) -> Occurrence {
+fn build(ev: &Component, meta: &FeedMeta, start: DateTime<FixedOffset>, end: DateTime<FixedOffset>, all_day: bool) -> Occurrence {
     let location = ev.text("LOCATION").unwrap_or_default();
     let raw_desc = ev.text("DESCRIPTION").unwrap_or_default();
     let conference = ev.prop("X-GOOGLE-CONFERENCE").map(|p| p.value.clone());
@@ -180,64 +171,60 @@ fn build(ev: &Component, meta: &FeedMeta, start: DateTime<Tz>, end: DateTime<Tz>
     }
 }
 
-fn rrule_source(ev: &Component, raw_start: IcalTime, display: &Tz) -> Option<String> {
-    let has_rule = ev.prop("RRULE").is_some() || ev.prop("RDATE").is_some();
-    if !has_rule {
-        return None;
-    }
-    let (p, v) = raw_start.rrule_parts(display);
-    let mut s = format!("DTSTART{p}:{v}");
-    let date_start = matches!(raw_start, IcalTime::Date(_));
-    for r in ev.props_named("RRULE") {
-        s.push_str("\nRRULE:");
-        s.push_str(&normalize_until(&r.value, date_start));
-    }
-    for name in ["RDATE", "EXDATE"] {
-        for prop in ev.props_named(name) {
-            let date_only = prop.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
-            for part in prop.value.split(',') {
-                if part.contains('/') {
-                    continue;
-                }
-                if let Some(t) = parse_time_value(part, prop.param("TZID"), date_only) {
-                    let (p, v) = t.rrule_parts(display);
-                    s.push_str(&format!("\n{name}{p}:{v}"));
-                }
-            }
+/// UTC instants listed in RDATE or EXDATE; a DATE value takes the series start's time of day.
+fn date_list(ev: &Component, name: &str, raw: &IcalTime, zones: &Zones) -> Vec<NaiveDateTime> {
+    let mut out = Vec::new();
+    for prop in ev.props_named(name) {
+        let date_only = prop.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
+        for part in prop.value.split(',').filter(|p| !p.contains('/')) {
+            let Some(t) = parse_time_value(part, prop.param("TZID"), date_only) else { continue };
+            let utc = match t {
+                IcalTime::Date(d) => raw.zone(zones).to_utc(d.and_time(raw.local().time())),
+                other => other.to_utc(zones),
+            };
+            out.push(utc);
         }
     }
-    Some(s)
+    out
 }
 
-fn normalize_until(rule: &str, date_start: bool) -> String {
-    rule.split(';')
-        .map(|part| match part.strip_prefix("UNTIL=") {
-            Some(u) if u.len() == 8 => format!("UNTIL={u}T235959"),
-            Some(u) if date_start && u.ends_with('Z') => format!("UNTIL={}", u.trim_end_matches('Z')),
-            _ => part.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(";")
+fn series_starts(ev: &Component, raw: &IcalTime, zones: &Zones, to: NaiveDateTime) -> Vec<NaiveDateTime> {
+    let src = raw.zone(zones);
+    let local = raw.local();
+    let stop_after = src.to_local(to) + Duration::days(1);
+    let mut starts: BTreeSet<NaiveDateTime> = BTreeSet::new();
+    let rules: Option<Vec<recur::Rule>> = ev.props_named("RRULE").map(|r| recur::parse(&r.value)).collect();
+    match rules {
+        Some(rules) if !rules.is_empty() => {
+            for rule in &rules {
+                let to_utc = |l: NaiveDateTime| src.to_utc(l);
+                starts.extend(recur::expand(rule, local, &to_utc, stop_after).into_iter().map(|l| src.to_utc(l)));
+            }
+        }
+        _ => {
+            starts.insert(src.to_utc(local));
+        }
+    }
+    starts.extend(date_list(ev, "RDATE", raw, zones));
+    for x in date_list(ev, "EXDATE", raw, zones) {
+        starts.remove(&x);
+    }
+    starts.into_iter().collect()
 }
 
-const MAX_INSTANCES: u16 = 5000;
-
-fn instances(source: &str, display: &Tz, lo: DateTime<Utc>, hi: DateTime<Utc>) -> Option<Vec<DateTime<Tz>>> {
-    let set = RRuleSet::from_str(source).ok()?;
-    let r = set.after(lo.with_timezone(display)).before(hi.with_timezone(display)).all(MAX_INSTANCES);
-    Some(r.dates.into_iter().map(|d| d.with_timezone(display)).collect())
+fn in_window(start: NaiveDateTime, end: NaiveDateTime, from: NaiveDateTime, to: NaiveDateTime) -> bool {
+    start < to && (end > from || start >= from)
 }
 
-fn in_window(start: DateTime<Tz>, end: DateTime<Tz>, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
-    start.with_timezone(&Utc) < to && (end.with_timezone(&Utc) > from || start.with_timezone(&Utc) >= from)
-}
-
-pub fn expand(cal: &Component, meta: &FeedMeta, display: Tz, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Occurrence> {
+pub fn expand(cal: &Component, meta: &FeedMeta, display: &Zone, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Occurrence> {
+    let system = system_zone;
+    let zones = Zones::new(cal, display.clone(), &system);
+    let (from, to) = (from.naive_utc(), to.naive_utc());
     let events = cal.events();
     let mut replaced: HashSet<(String, i64)> = HashSet::new();
     for ev in &events {
-        let Some(rid) = ev.prop("RECURRENCE-ID").and_then(parse_time).and_then(|t| t.to_dt(&display)) else { continue };
-        replaced.insert((ev.text("UID").unwrap_or_default(), rid.timestamp()));
+        let Some(rid) = ev.prop("RECURRENCE-ID").and_then(parse_time) else { continue };
+        replaced.insert((ev.text("UID").unwrap_or_default(), rid.to_utc(&zones).and_utc().timestamp()));
     }
 
     let mut out = Vec::new();
@@ -245,35 +232,26 @@ pub fn expand(cal: &Component, meta: &FeedMeta, display: Tz, from: DateTime<Utc>
         if is_cancelled(ev) {
             continue;
         }
-        let Some((t, raw)) = event_times(ev, &display) else { continue };
+        let Some((t, raw)) = event_times(ev, &zones) else { continue };
         let is_override = ev.prop("RECURRENCE-ID").is_some();
-        let uid = ev.text("UID").unwrap_or_default();
-
-        let source = if is_override { None } else { rrule_source(ev, raw, &display) };
-        let Some(source) = source else {
+        let has_rule = ev.prop("RRULE").is_some() || ev.prop("RDATE").is_some();
+        if is_override || !has_rule {
             if in_window(t.start, t.end, from, to) {
-                out.push(build(ev, meta, t.start, t.end, t.all_day));
+                out.push(build(ev, meta, display.display(t.start), display.display(t.end), t.all_day));
             }
             continue;
-        };
+        }
 
+        let uid = ev.text("UID").unwrap_or_default();
         let span = t.end - t.start;
-        let days = (t.end.date_naive() - t.start.date_naive()).num_days();
-        let starts = match instances(&source, &display, from - span - Duration::days(1), to) {
-            Some(v) => v,
-            None => vec![t.start],
-        };
-        for s in starts {
-            if replaced.contains(&(uid.clone(), s.timestamp())) {
+        let days = (display.to_local(t.end).date() - display.to_local(t.start).date()).num_days().max(1);
+        for s in series_starts(ev, &raw, &zones, to) {
+            if replaced.contains(&(uid.clone(), s.and_utc().timestamp())) {
                 continue;
             }
-            let e = if t.all_day {
-                resolve(s.naive_local() + Duration::days(days.max(1)), &display).unwrap_or(s)
-            } else {
-                s + span
-            };
+            let e = if t.all_day { next_local_midnight(&zones, s, days) } else { s + span };
             if in_window(s, e, from, to) {
-                out.push(build(ev, meta, s, e, t.all_day));
+                out.push(build(ev, meta, display.display(s), display.display(e), t.all_day));
             }
         }
     }
