@@ -1,0 +1,45 @@
+[package]
+name = "skedaddle"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny Windows tray calendar that makes sure you never miss a meeting"
+license = "MIT"
+repository = "https://github.com/Cyronius/skedaddle"
+readme = "README.md"
+keywords = ["calendar", "icalendar", "tray", "meeting", "reminder"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "skedaddle"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rrule = "0.13"
+chrono-tz = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
+windows = { version = "0.61", features = [
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Threading",
+  "Win32_System_Registry", "Win32_System_Power", "Win32_System_SystemServices",
+  "Win32_UI_HiDpi", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_Storage_FileSystem",
+  "Win32_UI_Input_KeyboardAndMouse", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_Media", "Win32_System_SystemInformation",
+] }
+
+[[test]]
+name = "cal"
+path = "specs/cal/tests/cal.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"
