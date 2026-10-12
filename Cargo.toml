@@ -17,8 +17,6 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-rrule = "0.13"
-chrono-tz = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
@@ -33,9 +31,21 @@ windows = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_Media", "Win32_System_SystemInformation",
 ] }
 
+# Differential test oracle only; never linked into the exe.
+[dev-dependencies]
+rrule = "0.13"
+
 [[test]]
 name = "cal"
 path = "specs/cal/tests/cal.rs"
+
+[[test]]
+name = "recur"
+path = "specs/cal/tests/recur.rs"
+
+[[test]]
+name = "tz"
+path = "specs/cal/tests/tz.rs"
 
 [profile.release]
 lto = true

@@ -10,12 +10,12 @@ It reads your calendar from a standard iCalendar (`.ics`) feed, so it works with
 
 | | Skedaddle |
 |---|---|
-| Download | **one 2.9 MB exe**, no installer, no dependencies |
-| RAM in the tray | **about 2 MB** (private memory, measured) |
+| Download | **one 0.9 MB exe**, no installer, no dependencies |
+| RAM in the tray | **about 2.5 MB** (private memory, measured) |
 | CPU when idle | **0%**: no polling loop; it wakes only for a feed sync or an alert |
 | Runtime | none: no Electron, no browser engine, no .NET, no background service |
 
-It is written in Rust against the plain Win32 API and draws its own UI with GDI. When you close the calendar view, it frees the view's memory and goes back to its tray-only footprint. For comparison, a typical Electron app uses well over 100 MB of RAM just to sit in the tray.
+It is written in Rust against the plain Win32 API and draws its own UI with GDI. It ships no time zone database of its own: it reads zone rules from your calendar feed, or from the one already built into Windows. When you close the calendar view, it frees the view's memory and goes back to its tray-only footprint. For comparison, a typical Electron app uses well over 100 MB of RAM just to sit in the tray.
 
 ## Features
 
@@ -31,7 +31,7 @@ It is written in Rust against the plain Win32 API and draws its own UI with GDI.
 
 ## Requirements
 
-- Windows 10 or 11
+- Windows 10 (version 1903 or later) or Windows 11
 - A calendar that can publish an iCalendar (`.ics`) URL
 
 ## Install
@@ -131,7 +131,7 @@ Skedaddle talks only to the feed URLs that you give it. It has no telemetry, no 
 - **Read-only.** You cannot create or edit events. Use your normal calendar for that.
 - **Windows only.**
 - **Feed delay.** Each provider decides how fast its feed shows a new event. A meeting added a minute before it starts can be missed.
-- **Time zones.** Feeds that use IANA zone names (Google, iCloud, Fastmail) work fully. Outlook feeds that use Windows zone names ("Eastern Standard Time") are read in your local time zone for now.
+- **Uncommon repeat rules.** Rules built on week numbers, days of the year, or several times per day show their first instance only. Google, Outlook and iCloud do not create these from their normal UI.
 - **Screen sharing.** The flash and popup show in a shared screen, including the meeting title. Set `flash = false` if that is a problem.
 
 ## Build and test

@@ -21,20 +21,28 @@ The app unfolds lines, reads quoted parameters, unescapes text, and reads DATE, 
 
 RRULE and RDATE expand inside the requested window. EXDATE removes instances. A RECURRENCE-ID event replaces its instance. A cancelled event or cancelled override is not shown.
 
+The engine supports `FREQ` DAILY, WEEKLY, MONTHLY and YEARLY with `INTERVAL`, `COUNT`, `UNTIL` (date, local date-time or UTC), `BYDAY` (with ordinals), `BYMONTHDAY` (also negative), `BYMONTH`, `BYSETPOS` and `WKST`. A rule with any other part (`BYWEEKNO`, `BYYEARDAY`, `BYHOUR`, `BYMINUTE`, `BYSECOND`, or a shorter `FREQ`) shows its first instance only. `DTSTART` is always the first instance. Invalid dates (the 31st in a 30-day month) are skipped. `COUNT` is applied before `EXDATE`.
+
 **Acceptance criteria:**
 - Weekly series with one EXDATE, one moved instance and one cancelled instance yields the expected instance list.
 - An expansion window returns only events that overlap it.
+- Hand-checked lists for: 2nd Tuesday, last Friday, last day of month, last weekday (`BYSETPOS=-1`), monthly from the 31st, every other week on two days with `WKST=SU`, the US DST start rule, `UNTIL` as a date and as UTC (inclusive), and `COUNT=5` with one `EXDATE` (four instances).
+- Unsupported rules parse as unsupported. An impossible rule (`BYMONTH=2;BYMONTHDAY=30`) ends with `DTSTART` only.
+- Differential: 28 common rules give the same instances as the `rrule` crate (dev-dependency only) through 2034.
 
 ### CAL-TZ: Time zones
 **Applies to:** skedaddle
 **Verification:** test
 
-Events show in the display zone. A recurring event keeps its wall-clock time across DST in its own zone. An unknown TZID is read as a floating time in the display zone.
+Events show in the display zone. A recurring event keeps its wall-clock time across DST in its own zone. A `TZID` resolves in this order: the feed's own `VTIMEZONE` with that `TZID`, then the IANA database in Windows ICU (`icu.dll`, Windows 10 1903+), then a floating time in the display zone. A local time in a spring-forward gap moves forward by the gap; a time in a fall-back overlap takes the earlier instant.
 
 **Acceptance criteria:**
 - Weekly 09:30 New York event is 14:30Z before US DST and 13:30Z after.
-- `Europe/London` 15:00 on 2026-03-10 is 11:00 New York.
+- `Europe/London` 15:00 on 2026-03-10 (no `VTIMEZONE` in the feed) is 11:00 New York.
 - All-day event runs from local midnight to the next local midnight.
+- A zone defined only by a `VTIMEZONE` ("Test Zone", +05:30) resolves to its offset.
+- `TZID=Eastern Standard Time` with its Outlook `VTIMEZONE`: 09:30 is 14:30Z in January and 13:30Z in July.
+- 02:30 on the US spring-forward day is 07:30Z (03:30 EDT). 01:30 on the fall-back day is 05:30Z.
 
 ## Alerts
 

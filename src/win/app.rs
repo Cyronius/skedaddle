@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{Duration, Local, Utc};
 use skedaddle::alerts;
 use skedaddle::config::{parse_color, TEMPLATE};
-use skedaddle::model::{fmt_in, fmt_time, AlertKey, Occurrence, Rsvp, Tz};
+use skedaddle::model::{fmt_in, fmt_time, AlertKey, Occurrence, Rsvp};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
@@ -92,7 +92,7 @@ fn tooltip(snap: Option<&Snapshot>) -> (String, bool) {
     let h24 = s.config.clock_24h();
     let mut tip = String::new();
     if stale {
-        let since = s.oldest_sync().map(|t| fmt_time(&t.with_timezone(&Tz::LOCAL), h24)).unwrap_or_else(|| "start".into());
+        let since = s.oldest_sync().map(|t| fmt_time(&t.with_timezone(&Local).fixed_offset(), h24)).unwrap_or_else(|| "start".into());
         tip.push_str(&format!("Not synced since {since}\n"));
     }
     let live = |o: &&Occurrence| !o.all_day && o.rsvp != Rsvp::Declined && o.end.with_timezone(&Utc) > now;
@@ -203,7 +203,7 @@ fn on_snapshot(hwnd: HWND, snap: Arc<Snapshot>) {
 }
 
 fn test_alert(hwnd: HWND) {
-    let now = Utc::now().with_timezone(&Tz::LOCAL);
+    let now = Local::now().fixed_offset();
     let o = Occurrence {
         feed: 0,
         uid: format!("test-{}", now.timestamp()),

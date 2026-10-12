@@ -9,7 +9,8 @@ use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use skedaddle::config::{Config, FeedCfg, TEMPLATE};
 use skedaddle::expand::{expand, FeedMeta};
 use skedaddle::ical;
-use skedaddle::model::{local_midnight_utc, Occurrence, Tz};
+use skedaddle::model::{local_midnight_utc, Occurrence};
+use skedaddle::tz::Zone;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -253,7 +254,7 @@ impl Worker {
             let cal = ical::parse(&String::from_utf8_lossy(&bytes));
             let owner = f.owner();
             let meta = FeedMeta { index: i, owner_email: owner.as_deref() };
-            all.extend(expand(&cal, &meta, Tz::LOCAL, from, to));
+            all.extend(expand(&cal, &meta, &Zone::Local, from, to));
         }
         all.sort_by_key(|o| (o.start.timestamp(), o.end.timestamp()));
         self.occs = Arc::new(all);
