@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use skedaddle::alerts::{due, next_wake, Rules};
-use skedaddle::config::{parse_color, Config, FeedCfg, TEMPLATE};
+use skedaddle::config::{parse_color, Config, FeedCfg};
 use skedaddle::expand::{expand, FeedMeta};
 use skedaddle::ical::{parse, parse_line, unescape, unfold};
 use skedaddle::join::find_join_url;
+use skedaddle::theme::{self, THEMES};
 use skedaddle::model::{Occurrence, Rsvp};
 use skedaddle::tz::{feed_zones, Zone};
 
@@ -203,8 +204,8 @@ fn join_url_ignores_unlisted_domains_and_lookalikes() {
 
 // Traces: CAL-FEED-CONFIG
 #[test]
-fn config_template_parses_and_owner_comes_from_google_url() {
-    let c = Config::parse(TEMPLATE).unwrap();
+fn empty_config_parses_and_owner_comes_from_google_url() {
+    let c = Config::parse("").unwrap();
     assert_eq!(c.alert.lead_minutes, 1);
     assert!(c.feed.is_empty());
     let c = Config::parse("[[feed]]\nname='W'\nurl='https://calendar.google.com/calendar/ical/me%40example.com/private-abc/basic.ics'").unwrap();
@@ -226,4 +227,115 @@ fn weekly_all_day_series_with_date_until_expands_in_local_zone() {
     let days: Vec<String> = v.iter().map(|o| o.start.format("%Y-%m-%d").to_string()).collect();
     assert_eq!(days, vec!["2026-03-02", "2026-03-09", "2026-03-16"]);
     assert!(v.iter().all(|o| o.all_day));
+}
+
+fn sample_config() -> Config {
+    let mut c = Config::default();
+    c.week_start = "monday".into();
+    c.clock = "24h".into();
+    c.theme = "solarized-dark".into();
+    c.text_size = "large".into();
+    c.day_start = 6;
+    c.day_end = 20;
+    c.alert.lead_minutes = 5;
+    c.alert.play_sound = false;
+    c.alert.skip_free = true;
+    c.feed = vec![
+        FeedCfg { name: "Work".into(), url: "https://calendar.google.com/calendar/ical/me%40example.com/private-x/basic.ics".into(), color: "#4285F4".into(), owner_email: None },
+        FeedCfg { name: "Home".into(), url: "webcal://cal.example.com/h.ics".into(), color: "#0F9D58".into(), owner_email: Some("me@example.com".into()) },
+    ];
+    c
+}
+
+// Traces: CAL-FEED-CONFIG
+#[test]
+fn config_survives_toml_round_trip() {
+    let c = sample_config();
+    assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
+    let d = Config::default();
+    assert_eq!(Config::parse(&d.to_toml()).unwrap(), d);
+}
+
+// Traces: CAL-FEED-CONFIG
+#[test]
+fn config_from_an_older_version_still_loads() {
+    let old = "poll_minutes = 15
+week_start = \"monday\"
+[alert]
+lead_minutes = 2
+flash = false
+flash_color = \"#112233\"
+sound = \"none\"
+";
+    let c = Config::parse(old).unwrap();
+    assert!(c.monday_first());
+    assert_eq!(c.alert.lead_minutes, 2);
+    assert!(c.alert.play_sound);
+}
+
+// Traces: CAL-FEED-CONFIG
+#[test]
+fn validate_accepts_default_and_sample_configs() {
+    assert!(Config::default().validate().is_empty());
+    assert!(sample_config().validate().is_empty());
+    assert_eq!(Config::default().text_scale(), 115);
+    assert_eq!((Config::default().day_start, Config::default().day_end), (7, 18));
+    assert_eq!(sample_config().text_scale(), 130);
+}
+
+// Traces: CAL-FEED-CONFIG
+#[test]
+fn validate_reports_one_message_per_bad_field() {
+    let bad = |f: fn(&mut Config)| {
+        let mut c = sample_config();
+        f(&mut c);
+        c.validate().len()
+    };
+    assert_eq!(bad(|c| c.week_start = "friday".into()), 1);
+    assert_eq!(bad(|c| c.clock = "36h".into()), 1);
+    assert_eq!(bad(|c| c.theme = "neon".into()), 1);
+    assert_eq!(bad(|c| c.text_size = "huge".into()), 1);
+    assert_eq!(bad(|c| c.day_start = 24), 1);
+    assert_eq!(bad(|c| c.day_end = 25), 1);
+    assert_eq!(bad(|c| {
+        c.day_start = 10;
+        c.day_end = 12;
+    }), 1);
+    assert_eq!(bad(|c| c.alert.lead_minutes = -1), 1);
+    assert_eq!(bad(|c| c.alert.lead_minutes = 61), 1);
+    assert_eq!(bad(|c| c.feed[0].url = "".into()), 1);
+    assert_eq!(bad(|c| c.feed[0].url = "ftp://x/y.ics".into()), 1);
+    assert_eq!(bad(|c| c.feed[1].color = "#12".into()), 1);
+    assert_eq!(bad(|c| {
+        c.theme = "neon".into();
+        c.feed[0].url = "".into();
+    }), 2);
+}
+
+// Traces: CAL-THEME
+#[test]
+fn themes_have_unique_ids_and_resolve() {
+    let mut ids: Vec<&str> = THEMES.iter().map(|t| t.id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), THEMES.len());
+    assert!(theme::is_known("auto") && theme::is_known("Rosewood") && !theme::is_known("neon"));
+    assert_eq!(theme::resolve("auto", false).id, "light");
+    assert_eq!(theme::resolve("auto", true).id, "dark");
+    assert_eq!(theme::resolve("ledger", false).id, "ledger");
+    assert_eq!(theme::resolve("porcelain", true).id, "dark");
+    assert_eq!(theme::find("light").unwrap().label, "Basic Light");
+}
+
+// Traces: CAL-THEME
+#[test]
+fn every_theme_is_readable() {
+    for t in THEMES.iter() {
+        assert!(theme::contrast(t.text, t.bg) >= 4.5, "{} text on bg", t.id);
+        assert!(theme::contrast(t.text, t.panel) >= 4.5, "{} text on panel", t.id);
+        assert!(theme::contrast(t.dim, t.bg) >= 3.0, "{} dim on bg", t.id);
+        assert!(theme::contrast(t.accent, t.bg) >= 1.5, "{} accent on bg", t.id);
+        assert!(theme::contrast(t.on_accent(), t.accent) >= 3.0, "{} text on accent", t.id);
+        assert!(theme::contrast(t.on_ok(), t.ok) >= 3.0, "{} text on ok", t.id);
+    }
 }

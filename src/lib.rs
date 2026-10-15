@@ -8,4 +8,5 @@ pub mod join;
 pub mod layout;
 pub mod model;
 pub mod recur;
+pub mod theme;
 pub mod tz;

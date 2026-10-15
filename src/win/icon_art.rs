@@ -9,31 +9,66 @@ fn in_round_rect(x: f32, y: f32, l: f32, t: f32, r: f32, b: f32, rad: f32) -> bo
     (x - cx).hypot(y - cy) <= rad
 }
 
-fn sample(x: f32, y: f32, stale: bool) -> Option<Rgb> {
-    if stale {
-        let d = (x - 0.74).hypot(y - 0.74);
-        if d < 0.26 {
-            return Some(if d < 0.19 { (255.0, 149.0, 0.0) } else { (255.0, 255.0, 255.0) });
-        }
-    }
-    if !in_round_rect(x, y, 0.05, 0.09, 0.95, 0.95, 0.15) {
+const ORANGE: Rgb = (255.0, 122.0, 26.0);
+const SHOE: Rgb = (194.0, 65.0, 12.0);
+const BLUE: Rgb = (66.0, 133.0, 244.0);
+const LEAN: f32 = 0.1745;
+
+fn dist_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let t = (((px - a.0) * dx + (py - a.1) * dy) / (dx * dx + dy * dy).max(1e-6)).clamp(0.0, 1.0);
+    (px - (a.0 + t * dx)).hypot(py - (a.1 + t * dy))
+}
+
+fn near(px: f32, py: f32, path: &[(f32, f32)], radius: f32) -> bool {
+    path.windows(2).any(|s| dist_to_segment(px, py, s[0], s[1]) <= radius)
+}
+
+fn sample_page(px: f32, py: f32, detail: bool) -> Option<Rgb> {
+    let (dx, dy) = (px - 34.0, py - 20.0);
+    let (sin, cos) = LEAN.sin_cos();
+    let (x, y) = (34.0 + dx * cos + dy * sin, 20.0 - dx * sin + dy * cos);
+    if !in_round_rect(x, y, 12.25, 2.25, 55.75, 37.75, 8.75) {
         return None;
     }
-    if !in_round_rect(x, y, 0.09, 0.13, 0.91, 0.91, 0.12) {
-        return Some((150.0, 156.0, 165.0));
+    if !in_round_rect(x, y, 15.75, 5.75, 52.25, 34.25, 5.25) {
+        return Some(ORANGE);
     }
-    if y < 0.34 {
-        return Some((66.0, 133.0, 244.0));
+    if y < 15.0 {
+        return Some(BLUE);
     }
-    let gx = (x - 0.19) / 0.62;
-    let gy = (y - 0.44) / 0.40;
-    if (0.0..1.0).contains(&gx) && (0.0..1.0).contains(&gy) {
-        let (cx, cy) = (gx * 4.0, gy * 3.0);
-        if cx.fract() < 0.62 && cy.fract() < 0.55 {
-            return Some((95.0, 99.0, 104.0));
+    if detail {
+        let in_cell = |cx: f32, top: f32, bottom: f32| x >= cx && x <= cx + 7.0 && y >= top && y <= bottom;
+        let top_row = [20.0, 30.0, 40.0].iter().any(|c| in_cell(*c, 21.0, 26.0));
+        let low_row = [20.0, 30.0].iter().any(|c| in_cell(*c, 28.0, 32.0));
+        if top_row || low_row {
+            return Some((156.0, 163.0, 175.0));
         }
     }
     Some((255.0, 255.0, 255.0))
+}
+
+fn sample(x: f32, y: f32, stale: bool, detail: bool) -> Option<Rgb> {
+    if stale {
+        let d = (x - 0.79).hypot(y - 0.21);
+        if d < 0.21 {
+            return Some(if d < 0.15 { (229.0, 72.0, 77.0) } else { (255.0, 255.0, 255.0) });
+        }
+    }
+    let (px, py) = (x * 64.0, y * 64.0);
+    if let Some(c) = sample_page(px, py, detail) {
+        return Some(c);
+    }
+    if near(px, py, &[(15.0, 53.0), (23.0, 56.0)], 4.5) || near(px, py, &[(47.0, 53.0), (56.0, 56.0)], 4.5) {
+        return Some(SHOE);
+    }
+    if near(px, py, &[(26.0, 35.0), (22.0, 46.0), (15.0, 53.0)], 3.25) || near(px, py, &[(38.0, 37.0), (47.0, 43.0), (47.0, 53.0)], 3.25) {
+        return Some(ORANGE);
+    }
+    if near(px, py, &[(3.0, 16.0), (10.0, 16.0)], 1.6) || near(px, py, &[(2.0, 23.0), (11.0, 23.0)], 1.6) || near(px, py, &[(5.0, 30.0), (11.0, 30.0)], 1.6) {
+        return Some(BLUE);
+    }
+    None
 }
 
 /// Top-down BGRA pixels, straight (not premultiplied) alpha.
@@ -47,7 +82,7 @@ pub fn render_bgra(n: usize, stale: bool) -> Vec<u8> {
                 for sx in 0..SS {
                     let fx = (x as f32 + (sx as f32 + 0.5) / SS as f32) / n as f32;
                     let fy = (y as f32 + (sy as f32 + 0.5) / SS as f32) / n as f32;
-                    if let Some((cr, cg, cb)) = sample(fx, fy, stale) {
+                    if let Some((cr, cg, cb)) = sample(fx, fy, stale, n >= 24) {
                         r += cr;
                         g += cg;
                         b += cb;

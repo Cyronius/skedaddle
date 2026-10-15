@@ -27,6 +27,24 @@ pub fn is_enabled() -> bool {
     rc == ERROR_SUCCESS
 }
 
+// Keeps an enabled autostart entry working after the exe moves to its installed location.
+pub fn repoint(exe: &std::path::Path) {
+    if is_enabled() {
+        write(exe);
+    }
+}
+
+fn write(exe: &std::path::Path) {
+    let Some(key) = open(KEY_WRITE) else { return };
+    let name = wide(VALUE);
+    let w = wide(&format!("\"{}\"", exe.display()));
+    unsafe {
+        let bytes = std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * 2);
+        let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes));
+        let _ = RegCloseKey(key);
+    }
+}
+
 pub fn set(enabled: bool) {
     let Some(key) = open(KEY_WRITE) else { return };
     let name = wide(VALUE);

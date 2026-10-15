@@ -4,10 +4,13 @@ pub mod flash;
 pub mod gdi;
 pub mod icon;
 pub mod icon_art;
+pub mod install;
 pub mod modal;
 pub mod paths;
+pub mod settings;
 pub mod shared;
 pub mod sync;
+pub mod theme;
 pub mod tray;
 pub mod view;
 

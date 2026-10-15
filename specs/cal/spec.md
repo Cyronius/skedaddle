@@ -50,7 +50,7 @@ Events show in the display zone. A recurring event keeps its wall-clock time acr
 **Applies to:** skedaddle
 **Verification:** test
 
-An event alerts from `lead` before start until `grace` after start. The event is timed, not cancelled, and not declined by the feed owner. With `skip_free`, events marked TRANSPARENT do not alert. Each (feed, uid, start) alerts one time.
+An event alerts from `lead` (a setting, 1 to 10 minutes) before start until 5 minutes (fixed) after start. The event is timed, not cancelled, and not declined by the feed owner. With `skip_free`, events marked TRANSPARENT do not alert. Each (feed, uid, start) alerts one time.
 
 **Acceptance criteria:**
 - Not due at start − 61 s. Due at start − 59 s. Due at start + 5 min. Not due after start + 5 min + 1 s.
@@ -72,30 +72,44 @@ The join link comes from `X-GOOGLE-CONFERENCE`, then `LOCATION`, then `DESCRIPTI
 **Applies to:** skedaddle
 **Verification:** test
 
-The config is TOML. The built-in template parses. A Google feed URL gives the owner email. `owner_email` overrides it. Bad TOML is an error.
+The config is TOML. An empty file parses to the defaults. A Google feed URL gives the owner email. `owner_email` overrides it. Bad TOML is an error. Keys from older versions (`poll_minutes`, `alert.flash`, `alert.flash_color`, `alert.sound` and others) are ignored. The app writes the file itself from the Settings window; nobody edits it by hand. `Config::validate` returns one message per bad field.
 
 **Acceptance criteria:**
-- Template parses with no feeds.
+- An empty file parses with no feeds and `lead_minutes = 1`.
 - `.../ical/me%40example.com/private-x/basic.ics` gives `me@example.com`.
 - `poll_minutes = [` is an error.
+- A `Config` with two feeds and non-default settings survives serialize, then parse, unchanged.
+- A file written by an older version still loads.
+- `validate` accepts the default config (no feeds) and rejects: a week start other than sunday/monday, a clock other than 12h/24h, an unknown theme, `lead_minutes` outside 0..=60, a day view shorter than 4 hours or outside 12 AM to 12 AM, an unknown `text_size`, a feed address that is not `https://`, `http://` or `webcal://`, and a feed color that is not `#RRGGBB`.
+
+### CAL-THEME: Themes
+**Applies to:** skedaddle
+**Verification:** test
+
+A theme sets every color and the font in the app: calendar, Settings, alert popup, and the screen flash (the theme's accent). `auto` follows the Windows light/dark setting by picking the `light` or `dark` theme. The theme list is Auto, 6 light, 6 midtone and 6 dark themes. Meeting titles never include the meeting time; the time appears on its own line when the block is tall enough. Every button, segment, toggle, theme and calendar row in the calendar view and Settings shows hover feedback; the gear button has no background until hovered. Each theme names a Windows-installed font that all text in the app uses; if the font is missing, Segoe UI is used. A theme id that no longer exists (for example `porcelain`) renders as Auto.
+
+**Acceptance criteria:**
+- Theme ids are unique. `auto` is known; `neon` is not.
+- `auto` resolves to `light` on a light system and `dark` on a dark system. An unknown id such as `porcelain` resolves the same way.
+- For every theme: text on background and on panel has contrast of at least 4.5, dim text on background at least 3, the accent differs from the background (contrast at least 1.5), and the text color chosen for accent and for "ok" buttons has contrast of at least 3.
 
 ### CAL-FLASH: Screen flash
 **Applies to:** skedaddle
 **Verification:** manual
 
-**Verification (manual):** Tray menu "Test alert" with two or more monitors connected. Every monitor shows one blue pulse (default colour) for about 1.2 s. Click and type through the pulse; focus and input do not change. With Focus Assist on "Alarms only", the flash and modal still show.
+**Verification (manual):** Create a calendar event starting within the alert lead time, with two or more monitors connected. Every monitor shows one pulse in the theme's accent color for about 1.2 s. The flash cannot be turned off. Click and type through the pulse; focus and input do not change. With Focus Assist on "Alarms only", the flash and modal still show.
 
 ### CAL-MODAL: Alert popup
 **Applies to:** skedaddle
 **Verification:** manual
 
-**Verification (manual):** "Test alert" opens a topmost popup on the monitor with the cursor. It does not take focus: type in another window while it shows and no key reaches it. It has Join (when a link exists), Details and Dismiss. The flash repeats every `repeat_seconds` until Dismiss or `repeat_until_minutes` after start. Two events with one start time share one popup.
+**Verification (manual):** An event reaching its alert lead time opens a topmost popup on the monitor with the cursor. It does not take focus: type in another window while it shows and no key reaches it. It has Join (when a link exists), Details and Dismiss. The flash repeats every 60 s until Dismiss or 5 minutes after start. The popup uses the theme's colors. Two events with one start time share one popup.
 
 ### CAL-STALE-WARN: Stale feed warning
 **Applies to:** skedaddle
 **Verification:** manual
 
-**Verification (manual):** Set a feed URL that fails after one good sync (or disconnect the network). After 30 min the tray icon shows the warning badge and the tooltip says "not synced since HH:MM". After a good sync the badge goes away.
+**Verification (manual):** Set a feed URL that fails after one good sync (or disconnect the network). After 30 min the tray icon shows the warning badge. When no meeting is upcoming, the tooltip also says "Not synced since HH:MM". After a good sync the badge goes away.
 
 ### CAL-OFFLINE-CACHE: Offline start
 **Applies to:** skedaddle
@@ -109,7 +123,7 @@ The config is TOML. The built-in template parses. A Google feed URL gives the ow
 **Applies to:** skedaddle
 **Verification:** manual
 
-**Verification (manual):** Left click toggles the calendar window. Right click shows: Open calendar, Refresh now, Test alert, Open config file, Start with Windows, Quit. The tooltip shows the next event. A second launch opens the window of the first instance. After `taskkill /f /im explorer.exe` and restart of Explorer, the icon returns.
+**Verification (manual):** Left click toggles the calendar window. Clicking a meeting opens its details in a sidebar that narrows the calendar; it does not cover it. Right click shows: Open calendar, Refresh now, Test alert, Settings, Start with Windows, Install Skedaddle (only while running from outside the install folder), "Like this? Tip my local NPR station" (opens https://www.kuaf.com/donate), Quit. Left click opens Settings instead when no calendar is configured or the config file cannot be read. The tooltip shows only the next upcoming event; when there is none it shows the current event or "No upcoming events", plus "Not synced since HH:MM" if the feeds are stale. A second launch opens the window of the first instance. After `taskkill /f /im explorer.exe` and restart of Explorer, the icon returns.
 
 ### CAL-VIEW: Calendar window
 **Applies to:** skedaddle
@@ -128,3 +142,34 @@ The config is TOML. The built-in template parses. A Google feed URL gives the ow
 **Verification:** manual
 
 **Verification (manual):** Release binary ≤ 4 MB. Private working set (Task Manager → Details) ≤ 8 MB with the window never opened, ≤ 40 MB with the window open, ≤ 15 MB after it closes. CPU 0% between timers.
+
+## Settings
+
+### CAL-SETTINGS-FIRST-RUN: First run
+**Applies to:** skedaddle
+**Verification:** manual
+
+**Verification (manual):** Delete `%APPDATA%\skedaddle\config.toml` and start the app. The Settings window opens with one empty calendar and the address field focused; Notepad does not open. Close it with Cancel: no file is written and the next start opens it again. Paste a calendar address, press Save: `config.toml` exists and the calendar syncs without a restart.
+
+### CAL-SETTINGS-GEAR: Gear button
+**Applies to:** skedaddle
+**Verification:** manual
+
+**Verification (manual):** The calendar toolbar has a gear button at the far right, after Month. It opens Settings. A second click, or "Settings" in the tray menu, focuses the open window instead of opening another.
+
+### CAL-SETTINGS-EDIT: Settings window
+**Applies to:** skedaddle
+**Verification:** manual
+
+**Verification (manual):** Settings shows: the calendar list with Add and Remove and, for the selected calendar, name, address and "your email" (the calendar color is assigned automatically); Week starts on; Clock; Day view (start and end hour, at least 4 hours apart, default 7 AM to 6 PM; the day and week views stretch that range to fill the window and the rest of the day is a scroll away); Text size (Small, Medium, Large; applies to the calendar, the alert popup and Settings, and Settings resizes its text as soon as a size is clicked); Minutes before start (1, 2, 5, 10); Play a sound; Skip free events; and the theme picker. The picker is a four-way switch, Auto / Light / Midtone / Dark. Auto shows no list; the other three show only that group's themes, each with a color swatch and its name in its own font. Switching group picks the group's first theme. Choosing a theme recolors the window and changes its font at once; Cancel discards it. Save with a bad address (`ftp://x`) keeps the window open and shows the first error in red. Save with valid values writes the file, closes the window, and the calendar view, popup and flash use the new theme and its font. Enter saves, Esc cancels, Tab moves between the text fields.
+
+## Install
+
+### CAL-INSTALL: Self-install
+**Applies to:** skedaddle
+**Verification:** manual
+
+The exe can install itself for the current user, with no admin rights: it copies itself to `%LOCALAPPDATA%\Programs\Skedaddle\skedaddle.exe`, creates a Start Menu shortcut, registers an uninstall entry (Settings > Apps) whose command is `skedaddle.exe --uninstall`, repoints an existing Start with Windows entry, and starts the installed copy. On launch, from a copy that is not the installed one, it asks once. Answering No is remembered in `%LOCALAPPDATA%\skedaddle\install-declined.txt`, so it never asks again. It also does not ask when an installed copy already exists. The tray menu shows "Install Skedaddle..." whenever the running copy is not the installed one.
+
+**Verification (manual):** With `APPDATA` and `LOCALAPPDATA` pointing at empty folders, run a copy of the exe from another folder. (1) Answer Yes: the installed exe, the shortcut and the uninstall registry key exist, the installed copy runs, the first copy exits. (2) Run `skedaddle.exe --uninstall` from the install folder and answer Yes, then No to deleting settings: the shortcut and registry key are gone, the running copy closes, and the install folder is deleted a few seconds later. (3) Delete the install folder, run the copy again and answer No: `install-declined.txt` exists and the app keeps running; run it a third time: no prompt appears. (4) The tray menu still lists "Install Skedaddle..." and choosing it installs without asking.
+

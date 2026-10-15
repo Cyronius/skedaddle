@@ -4,21 +4,21 @@ use chrono::{Datelike, Duration, Local, Months, NaiveDate, NaiveDateTime, Timeli
 use skedaddle::config::{parse_color, Config};
 use skedaddle::layout;
 use skedaddle::model::{fmt_time, local_midnight_utc, AlertKey, Occurrence, Rsvp};
-use windows::core::{w, BOOL};
+use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::gdi::{self, Fonts};
 use super::paths;
 use super::shared;
 use super::sync::{Cmd, Snapshot};
+use super::theme::{apply_title_bar, pal_for, system_dark, Pal};
 
+const WM_MOUSELEAVE: u32 = 0x02A3;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Day,
@@ -32,6 +32,7 @@ enum Hit {
     Prev,
     Next,
     Mode(Mode),
+    Settings,
     Event(AlertKey),
     Day(NaiveDate),
     CloseDetail,
@@ -52,6 +53,8 @@ struct View {
     max_scroll: i32,
     requested: Option<(NaiveDate, NaiveDate)>,
     pressed: Option<(RECT, Hit, bool)>,
+    hover: Option<RECT>,
+    tracking: bool,
 }
 
 thread_local! {
@@ -68,51 +71,9 @@ thread_local! {
         max_scroll: 0,
         requested: None,
         pressed: None,
+        hover: None,
+        tracking: false,
     });
-}
-
-#[derive(Clone, Copy)]
-struct Pal {
-    bg: u32,
-    panel: u32,
-    grid: u32,
-    text: u32,
-    dim: u32,
-    accent: u32,
-    now: u32,
-}
-
-fn palette(dark: bool) -> Pal {
-    if dark {
-        Pal { bg: 0x1E1F22, panel: 0x2B2D30, grid: 0x3A3C40, text: 0xE6E6E6, dim: 0x9AA0A6, accent: 0x5B9BFF, now: 0xFF6B5E }
-    } else {
-        Pal { bg: 0xFFFFFF, panel: 0xF4F5F7, grid: 0xE1E3E7, text: 0x1F2328, dim: 0x667085, accent: 0x1A73E8, now: 0xEA4335 }
-    }
-}
-
-fn system_dark() -> bool {
-    let mut data: u32 = 1;
-    let mut size = 4u32;
-    let sub = super::wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-    let rc = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(sub.as_ptr()),
-            w!("AppsUseLightTheme"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(&mut data as *mut u32 as *mut _),
-            Some(&mut size),
-        )
-    };
-    rc.is_ok() && data == 0
-}
-
-fn apply_title_bar(hwnd: HWND, dark: bool) {
-    let v: BOOL = dark.into();
-    unsafe {
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &v as *const _ as *const _, 4);
-    }
 }
 
 fn week_start(d: NaiveDate, monday_first: bool) -> NaiveDate {
@@ -177,23 +138,6 @@ fn on_day(o: &Occurrence, d: NaiveDate) -> bool {
     s < de && (e > ds || (s == e && s >= ds))
 }
 
-fn compact_time(o: &Occurrence, h24: bool) -> String {
-    let t = o.start.naive_local();
-    if h24 {
-        return t.format("%H:%M").to_string();
-    }
-    let suffix = if t.hour() < 12 { "a" } else { "p" };
-    let h = match t.hour() % 12 {
-        0 => 12,
-        h => h,
-    };
-    if t.minute() == 0 {
-        format!("{h}{suffix}")
-    } else {
-        format!("{h}:{:02}{suffix}", t.minute())
-    }
-}
-
 fn hour_label(h: u32, h24: bool) -> String {
     if h24 {
         return format!("{h:02}:00");
@@ -219,6 +163,7 @@ struct Cx<'a> {
     cfg: &'a Config,
     hits: Vec<(RECT, Hit)>,
     pressed: Option<RECT>,
+    hover: Option<RECT>,
     now: NaiveDateTime,
     today: NaiveDate,
 }
@@ -230,13 +175,16 @@ impl Cx<'_> {
 
     fn button(&mut self, r: RECT, label: &str, hit: Hit, active: bool, font: HFONT) {
         let down = self.pressed == Some(r);
+        let hot = self.hover == Some(r);
         let (bg, fg) = match (active, down) {
-            (true, false) => (self.pal.accent, 0xFFFFFF),
-            (true, true) => (gdi::blend(0x000000, self.pal.accent, 0.25), 0xFFFFFF),
+            (true, false) if hot => (gdi::blend(self.pal.on_accent, self.pal.accent, 0.15), self.pal.on_accent),
+            (true, false) => (self.pal.accent, self.pal.on_accent),
+            (true, true) => (gdi::blend(0x000000, self.pal.accent, 0.25), self.pal.on_accent),
+            (false, false) if hot => (gdi::blend(self.pal.text, self.pal.bg, 0.10), self.pal.text),
             (false, false) => (self.pal.bg, self.pal.text),
             (false, true) => (gdi::blend(self.pal.text, self.pal.bg, 0.16), self.pal.text),
         };
-        gdi::round_fill(self.hdc, &r, if active { bg } else { self.pal.grid }, self.sc(6));
+        gdi::round_fill(self.hdc, &r, if active { bg } else { self.pal.line }, self.sc(6));
         if !active {
             let inner = gdi::rect(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1);
             gdi::round_fill(self.hdc, &inner, bg, self.sc(6));
@@ -246,10 +194,17 @@ impl Cx<'_> {
         self.hits.push((r, hit));
     }
 
+    fn nav_button(&mut self, r: RECT, hit: Hit, left: bool) {
+        let down = self.pressed == Some(r);
+        self.button(r, "", hit, false, self.fonts.bold);
+        let cy = (r.top + r.bottom) / 2 + down as i32;
+        gdi::chevron(self.hdc, (r.left + r.right) / 2, cy, self.sc(7), left, self.pal.text, self.sc(2).max(2));
+    }
+
     fn event_fill(&self, o: &Occurrence) -> (u32, u32, u32) {
         let c = feed_color(self.cfg, o.feed);
         let declined = o.rsvp == Rsvp::Declined;
-        let t = if declined { 0.10 } else if self.pal.bg == 0xFFFFFF { 0.20 } else { 0.32 };
+        let t = if declined { 0.10 } else if !self.pal.dark { 0.20 } else { 0.32 };
         let text = if declined { self.pal.dim } else { self.pal.text };
         (c, gdi::blend(c, self.pal.bg, t), text)
     }
@@ -275,12 +230,26 @@ impl Cx<'_> {
         let tw = gdi::text_width(self.hdc, "Today", self.fonts.bold) + self.sc(28);
         self.button(gdi::rect(x, by, x + tw, by + bh), "Today", Hit::Today, false, self.fonts.bold);
         x += tw + self.sc(8);
-        self.button(gdi::rect(x, by, x + self.sc(34), by + bh), "‹", Hit::Prev, false, self.fonts.arrow);
+        self.nav_button(gdi::rect(x, by, x + self.sc(34), by + bh), Hit::Prev, true);
         x += self.sc(40);
-        self.button(gdi::rect(x, by, x + self.sc(34), by + bh), "›", Hit::Next, false, self.fonts.arrow);
+        self.nav_button(gdi::rect(x, by, x + self.sc(34), by + bh), Hit::Next, false);
         x += self.sc(46);
 
         let mut mx = rc.right - self.sc(12);
+        let gear = gdi::rect(mx - self.sc(34), by, mx, by + bh);
+        let down = self.pressed == Some(gear);
+        let bg = if down {
+            gdi::blend(self.pal.text, self.pal.panel, 0.18)
+        } else if self.hover == Some(gear) {
+            gdi::blend(self.pal.text, self.pal.panel, 0.10)
+        } else {
+            self.pal.panel
+        };
+        gdi::round_fill(self.hdc, &gear, bg, self.sc(6));
+        self.hits.push((gear, Hit::Settings));
+        let r = (gear.right - gear.left) * 5 / 14;
+        gdi::gear(self.hdc, (gear.left + gear.right) / 2, (gear.top + gear.bottom) / 2 + down as i32, r, self.pal.text, bg);
+        mx -= self.sc(46);
         for (m, label) in [(Mode::Month, "Month"), (Mode::Week, "Week"), (Mode::Day, "Day")] {
             let r = gdi::rect(mx - self.sc(68), by, mx, by + bh);
             self.button(r, label, Hit::Mode(m), v.mode == m, self.fonts.bold);
@@ -302,9 +271,9 @@ impl Cx<'_> {
                 (format!("Synced {t}"), self.pal.dim)
             }
         };
-        let sw = gdi::text_width(self.hdc, &status, self.fonts.small) + self.sc(8);
+        let sw = (gdi::text_width(self.hdc, &status, self.fonts.small) + self.sc(8)).min((mx - x) / 2);
         let sr = gdi::rect(mx - sw - self.sc(8), 0, mx, h);
-        gdi::text(self.hdc, &status, sr, color, self.fonts.small, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+        gdi::text(self.hdc, &status, sr, color, self.fonts.small, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS);
 
         let label = range_label(v.mode, v.anchor, self.cfg.monday_first());
         gdi::text(self.hdc, &label, gdi::rect(x, 0, sr.left - self.sc(8), h), self.pal.text, self.fonts.title, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
@@ -317,18 +286,22 @@ impl Cx<'_> {
         let n = days.len() as i32;
         let col_w = (area.right - area.left - gutter) / n;
         let head_h = self.sc(if n == 1 { 52 } else { 58 });
-        let line_h = self.sc(20);
+        let line_h = gdi::text_height(self.hdc, "Ag", 10000, self.fonts.small) + self.sc(5);
+        let ev_line = gdi::text_height(self.hdc, "Ag", 10000, self.fonts.event_bold);
 
         let per_day: Vec<(Vec<&Occurrence>, Vec<&Occurrence>)> = days.iter().map(|d| self.day_events(occs, *d)).collect();
         let strip_rows = per_day.iter().map(|(a, _)| a.len()).max().unwrap_or(0) as i32;
         let strip_h = if strip_rows > 0 { strip_rows * line_h + self.sc(8) } else { 0 };
 
         let top = area.top + head_h + strip_h;
-        let hour_h = self.sc(48);
         let visible = area.bottom - top;
-        v.max_scroll = (24 * hour_h - visible).max(0);
+        let span = (self.cfg.day_end - self.cfg.day_start) as i32;
+        let pad = self.sc(12);
+        let hour_h = ((visible - 2 * pad) / span.max(1)).max(self.sc(40));
+        v.max_scroll = (24 * hour_h + 2 * pad - visible).max(0);
         if let Some(hour) = v.autoscroll.take() {
-            v.scroll = (hour - 1).max(0) * hour_h;
+            let in_day = hour >= self.cfg.day_start as i32 && hour < self.cfg.day_end as i32;
+            v.scroll = if in_day { self.cfg.day_start as i32 * hour_h } else { (hour - 1).max(0) * hour_h };
         }
         v.scroll = v.scroll.clamp(0, v.max_scroll);
         let clip = gdi::rect(area.left, top, area.right, area.bottom);
@@ -345,9 +318,9 @@ impl Cx<'_> {
             }
         }
         for hr in 0..24u32 {
-            let y = top + hr as i32 * hour_h - v.scroll;
+            let y = top + pad + hr as i32 * hour_h - v.scroll;
             if hr > 0 {
-                gdi::text(self.hdc, &hour_label(hr, h24), gdi::rect(area.left, y - self.sc(9), area.left + gutter - self.sc(8), y + self.sc(9)), self.pal.dim, self.fonts.small, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+                gdi::text(self.hdc, &hour_label(hr, h24), gdi::rect(area.left, y - self.sc(11), area.left + gutter - self.sc(8), y + self.sc(11)), self.pal.dim, self.fonts.small, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
             }
             gdi::fill(self.hdc, &gdi::rect(area.left + gutter, y, area.right, y + 1), self.pal.grid);
         }
@@ -373,8 +346,8 @@ impl Cx<'_> {
                 let (s, e) = spans[p.idx];
                 let slot = (col_w - self.sc(6)) / p.cols as i32;
                 let x = cx + self.sc(2) + p.col as i32 * slot;
-                let y = top + (s as i32 * hour_h) / 60 - v.scroll;
-                let hh = (((e - s) as i32 * hour_h) / 60 - 2).max(self.sc(20));
+                let y = top + pad + (s as i32 * hour_h) / 60 - v.scroll;
+                let hh = (((e - s) as i32 * hour_h) / 60 - 2).max(ev_line + self.sc(8));
                 let r = gdi::rect(x, y, x + slot - 1, y + hh);
                 let (c, fill, tcol) = self.event_fill(o);
                 gdi::round_fill(self.hdc, &r, fill, self.sc(4));
@@ -388,7 +361,7 @@ impl Cx<'_> {
                 }
             }
             if *d == self.today {
-                let y = top + (self.now.hour() as i32 * 60 + self.now.minute() as i32) * hour_h / 60 - v.scroll;
+                let y = top + pad + (self.now.hour() as i32 * 60 + self.now.minute() as i32) * hour_h / 60 - v.scroll;
                 gdi::fill(self.hdc, &gdi::rect(cx, y - 1, cx + col_w, y + 1), self.pal.now);
                 gdi::round_fill(self.hdc, &gdi::rect(cx - self.sc(4), y - self.sc(4), cx + self.sc(4), y + self.sc(4)), self.pal.now, self.sc(4));
             }
@@ -410,7 +383,7 @@ impl Cx<'_> {
             if is_today {
                 gdi::round_fill(self.hdc, &circle, self.pal.accent, self.sc(16));
             }
-            gdi::text(self.hdc, &num, circle, if is_today { 0xFFFFFF } else { self.pal.text }, self.fonts.title, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            gdi::text(self.hdc, &num, circle, if is_today { self.pal.on_accent } else { self.pal.text }, self.fonts.title, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             self.hits.push((hr, Hit::Day(*d)));
             gdi::fill(self.hdc, &gdi::rect(x, area.top, x + 1, top), self.pal.grid);
             for (k, o) in per_day[i].0.iter().enumerate() {
@@ -435,29 +408,28 @@ impl Cx<'_> {
         let pad = self.sc(7);
         let inner_w = r.right - r.left - pad - self.sc(3);
         let h = r.bottom - r.top;
-        let line = self.sc(16);
-        if h < self.sc(34) {
-            let label = format!("{}  {}", compact_time(o, h24), o.title);
-            gdi::text(self.hdc, &label, gdi::rect(r.left + pad, r.top, r.right - self.sc(3), r.bottom), color, self.fonts.small, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        let line = gdi::text_height(self.hdc, "Ag", 10000, self.fonts.event_bold);
+        if h < line * 2 + self.sc(4) {
+            let label = o.title.clone();
+            gdi::text(self.hdc, &label, gdi::rect(r.left + pad, r.top, r.right - self.sc(3), r.bottom), color, self.fonts.event, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             return;
         }
-        let th = gdi::text_height(self.hdc, &o.title, inner_w, self.fonts.small_bold).min(line * 2);
-        gdi::text(self.hdc, &o.title, gdi::rect(r.left + pad, r.top + 3, r.right - self.sc(3), r.top + 3 + th), color, self.fonts.small_bold, DT_WORDBREAK | DT_END_ELLIPSIS);
+        let th = gdi::text_height(self.hdc, &o.title, inner_w, self.fonts.event_bold).min(line * 2 + 2);
+        gdi::text(self.hdc, &o.title, gdi::rect(r.left + pad, r.top + 3, r.right - self.sc(3), r.top + 3 + th), color, self.fonts.event_bold, DT_WORDBREAK | DT_END_ELLIPSIS);
         if th + line + 4 <= h {
             let when = format!("{} – {}", fmt_time(&o.start, h24), fmt_time(&o.end, h24));
-            gdi::text(self.hdc, &when, gdi::rect(r.left + pad, r.top + 3 + th, r.right - self.sc(3), r.top + 3 + th + line), self.pal.dim, self.fonts.small, DT_SINGLELINE | DT_END_ELLIPSIS);
+            gdi::text(self.hdc, &when, gdi::rect(r.left + pad, r.top + 3 + th, r.right - self.sc(3), r.top + 3 + th + line), self.pal.dim, self.fonts.event, DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     }
 
     fn draw_month(&mut self, area: RECT, anchor: NaiveDate, occs: &[Occurrence], v: &View) {
-        let h24 = self.cfg.clock_24h();
         let monday = self.cfg.monday_first();
         let rows = month_rows(anchor, monday);
         let head_h = self.sc(28);
         let cell_w = (area.right - area.left) / 7;
         let cell_h = (area.bottom - area.top - head_h) / rows;
         let start = month_grid_start(anchor, monday);
-        let line_h = self.sc(19);
+        let line_h = gdi::text_height(self.hdc, "Ag", 10000, self.fonts.small) + self.sc(5);
 
         for c in 0..7 {
             let d = start + Duration::days(c);
@@ -482,7 +454,7 @@ impl Cx<'_> {
                 if is_today {
                     gdi::round_fill(self.hdc, &nr, self.pal.accent, self.sc(11));
                 }
-                gdi::text(self.hdc, &label, nr, if is_today { 0xFFFFFF } else if in_month { self.pal.text } else { self.pal.dim }, self.fonts.small_bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                gdi::text(self.hdc, &label, nr, if is_today { self.pal.on_accent } else if in_month { self.pal.text } else { self.pal.dim }, self.fonts.small_bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
                 let (all_day, timed) = self.day_events(occs, d);
                 let list: Vec<&Occurrence> = all_day.into_iter().chain(timed).collect();
@@ -498,7 +470,7 @@ impl Cx<'_> {
                         gdi::text(self.hdc, &o.title, gdi::rect(r.left + self.sc(7), r.top, r.right - self.sc(2), r.bottom), tcol, self.fonts.small, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
                     } else {
                         gdi::round_fill(self.hdc, &gdi::rect(r.left + self.sc(3), r.top + self.sc(6), r.left + self.sc(9), r.top + self.sc(12)), col, self.sc(3));
-                        let label = format!("{} {}", compact_time(o, h24), o.title);
+                        let label = o.title.clone();
                         gdi::text(self.hdc, &label, gdi::rect(r.left + self.sc(13), r.top, r.right - self.sc(2), r.bottom), tcol, self.fonts.small, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
                     }
                     if v.selected.as_ref() == Some(&o.key()) {
@@ -515,10 +487,8 @@ impl Cx<'_> {
         }
     }
 
-    fn draw_detail(&mut self, area: RECT, o: &Occurrence) {
+    fn draw_detail(&mut self, panel: RECT, o: &Occurrence) {
         let h24 = self.cfg.clock_24h();
-        let pw = self.sc(340).min(area.right - area.left);
-        let panel = gdi::rect(area.right - pw, area.top, area.right, area.bottom);
         gdi::fill(self.hdc, &panel, self.pal.panel);
         gdi::fill(self.hdc, &gdi::rect(panel.left, panel.top, panel.left + 1, panel.bottom), self.pal.grid);
         self.hits.push((panel, Hit::Nothing));
@@ -531,6 +501,9 @@ impl Cx<'_> {
         gdi::fill(self.hdc, &gdi::rect(panel.left + 1, y, panel.left + self.sc(5), y + self.sc(28)), color);
 
         let close = gdi::rect(panel.right - self.sc(40), panel.top + self.sc(10), panel.right - self.sc(10), panel.top + self.sc(40));
+        if self.hover == Some(close) {
+            gdi::round_fill(self.hdc, &close, gdi::blend(self.pal.text, self.pal.panel, 0.12), self.sc(6));
+        }
         gdi::text(self.hdc, "×", close, self.pal.dim, self.fonts.title, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
         let title = if o.title.is_empty() { "(no title)" } else { &o.title };
@@ -557,8 +530,9 @@ impl Cx<'_> {
         }
         if let Some(url) = &o.join_url {
             let b = gdi::rect(x, y, x + self.sc(120), y + self.sc(36));
-            gdi::round_fill(self.hdc, &b, 0x1E8E3E, self.sc(6));
-            gdi::text(self.hdc, "Join", b, 0xFFFFFF, self.fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            let ok = if self.hover == Some(b) { gdi::blend(self.pal.on_ok, self.pal.ok, 0.15) } else { self.pal.ok };
+            gdi::round_fill(self.hdc, &b, ok, self.sc(6));
+            gdi::text(self.hdc, "Join", b, self.pal.on_ok, self.fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             self.hits.push((b, Hit::Join(url.clone())));
             y += self.sc(50);
         }
@@ -576,16 +550,16 @@ fn now_hour() -> Option<i32> {
 }
 
 fn draw(hdc: HDC, rc: RECT, dpi: u32, v: &mut View, snap: Option<&Snapshot>, cfg: &Config) {
-    let pal = palette(v.dark);
-    if v.fonts.as_ref().map(|f| f.0) != Some(dpi) {
+    let pal = pal_for(&cfg.theme, v.dark);
+    if v.fonts.as_ref().map(|f| (f.0, f.1.face, f.1.scale)) != Some((dpi, pal.font, cfg.text_scale())) {
         if let Some((_, f)) = v.fonts.take() {
             f.destroy();
         }
-        v.fonts = Some((dpi, Fonts::new(dpi)));
+        v.fonts = Some((dpi, Fonts::new(dpi, pal.font, cfg.text_scale())));
     }
     let (fdpi, fonts) = v.fonts.take().unwrap();
     let now = Local::now().naive_local();
-    let mut cx = Cx { hdc, dpi, pal, fonts: &fonts, cfg, hits: Vec::new(), pressed: v.pressed.as_ref().filter(|p| p.2).map(|p| p.0), now, today: now.date() };
+    let mut cx = Cx { hdc, dpi, pal, fonts: &fonts, cfg, hits: Vec::new(), pressed: v.pressed.as_ref().filter(|p| p.2).map(|p| p.0), hover: v.hover, now, today: now.date() };
     gdi::fill(hdc, &rc, pal.bg);
 
     let monday = cfg.monday_first();
@@ -593,7 +567,10 @@ fn draw(hdc: HDC, rc: RECT, dpi: u32, v: &mut View, snap: Option<&Snapshot>, cfg
     let (a, b) = visible_range(v.mode, v.anchor, monday);
     let loading = snap.is_some_and(|s| local_midnight_utc(a) < s.from || local_midnight_utc(b + Duration::days(1)) > s.to);
     let tb_h = cx.draw_toolbar(rc, v, snap, loading);
-    let area = gdi::rect(0, tb_h, rc.right, rc.bottom);
+    let full = gdi::rect(0, tb_h, rc.right, rc.bottom);
+    let detail = v.selected.as_ref().and_then(|key| occs.iter().find(|o| o.key() == *key));
+    let pw = if detail.is_some() { gdi::scale(340, dpi).min((full.right - full.left) / 2) } else { 0 };
+    let area = gdi::rect(0, tb_h, rc.right - pw, rc.bottom);
     match v.mode {
         Mode::Day => cx.draw_grid(area, &[v.anchor], occs, v),
         Mode::Week => {
@@ -603,10 +580,8 @@ fn draw(hdc: HDC, rc: RECT, dpi: u32, v: &mut View, snap: Option<&Snapshot>, cfg
         }
         Mode::Month => cx.draw_month(area, v.anchor, occs, v),
     }
-    if let Some(key) = v.selected.clone() {
-        if let Some(o) = occs.iter().find(|o| o.key() == key) {
-            cx.draw_detail(area, o);
-        }
+    if let Some(o) = detail {
+        cx.draw_detail(gdi::rect(rc.right - pw, tb_h, rc.right, rc.bottom), o);
     }
     v.hits = cx.hits;
     v.fonts = Some((fdpi, fonts));
@@ -654,7 +629,7 @@ fn ensure_range(cfg: &Config) {
 fn click(hwnd: HWND, x: i32, y: i32) {
     let hit = VIEW.with(|v| v.borrow().hits.iter().rev().find(|(r, _)| gdi::contains(r, x, y)).cloned());
     let Some((rect, hit)) = hit else { return };
-    if matches!(hit, Hit::Today | Hit::Prev | Hit::Next | Hit::Mode(_)) {
+    if matches!(hit, Hit::Today | Hit::Prev | Hit::Next | Hit::Mode(_) | Hit::Settings) {
         VIEW.with(|v| v.borrow_mut().pressed = Some((rect, hit, true)));
         unsafe {
             SetCapture(hwnd);
@@ -678,6 +653,31 @@ fn release(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
+fn update_hover(hwnd: HWND, x: i32, y: i32) {
+    let (changed, track) = VIEW.with(|v| {
+        let mut v = v.borrow_mut();
+        let now = v
+            .hits
+            .iter()
+            .rev()
+            .find(|(r, _)| gdi::contains(r, x, y))
+            .filter(|(_, h)| matches!(h, Hit::Today | Hit::Prev | Hit::Next | Hit::Mode(_) | Hit::Settings | Hit::Join(_) | Hit::CloseDetail))
+            .map(|(r, _)| *r);
+        let changed = v.hover != now;
+        v.hover = now;
+        (changed, !std::mem::replace(&mut v.tracking, true))
+    });
+    unsafe {
+        if track {
+            let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            let _ = TrackMouseEvent(&mut t);
+        }
+        if changed {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+}
+
 fn drag(hwnd: HWND, x: i32, y: i32) {
     let changed = VIEW.with(|v| {
         let mut v = v.borrow_mut();
@@ -695,6 +695,7 @@ fn drag(hwnd: HWND, x: i32, y: i32) {
 fn perform(hwnd: HWND, hit: Hit) {
     let today = Local::now().date_naive();
     let mut url = None;
+    let mut settings = false;
     VIEW.with(|v| {
         let mut v = v.borrow_mut();
         match hit {
@@ -716,6 +717,7 @@ fn perform(hwnd: HWND, hit: Hit) {
                     v.autoscroll = now_hour();
                 }
             }
+            Hit::Settings => settings = true,
             Hit::CloseDetail => v.selected = None,
             Hit::Join(u) => url = Some(u),
             Hit::Nothing => {}
@@ -723,6 +725,9 @@ fn perform(hwnd: HWND, hit: Hit) {
     });
     if let Some(u) = url {
         gdi::open_url(&u);
+    }
+    if settings {
+        super::settings::show();
     }
     ensure_range(&shared::config());
     unsafe {
@@ -790,7 +795,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             release(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
             LRESULT(0)
         }
+        WM_MOUSELEAVE => {
+            VIEW.with(|v| {
+                let mut v = v.borrow_mut();
+                v.hover = None;
+                v.tracking = false;
+            });
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
+            update_hover(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
             drag(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
             LRESULT(0)
         }
@@ -827,7 +842,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_SETTINGCHANGE => {
             let dark = system_dark();
             VIEW.with(|v| v.borrow_mut().dark = dark);
-            apply_title_bar(hwnd, dark);
+            apply_title_bar(hwnd, pal_for(&shared::config().theme, dark).dark);
             let _ = InvalidateRect(Some(hwnd), None, false);
             DefWindowProcW(hwnd, msg, wp, lp)
         }
@@ -905,7 +920,7 @@ fn ensure_window() -> HWND {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("skedaddle.view"),
-            w!("skedaddle"),
+            w!("Skedaddle"),
             WS_OVERLAPPEDWINDOW,
             r.left,
             r.top,
@@ -940,7 +955,7 @@ pub fn show() {
         v.autoscroll = now_hour();
         v.selected = None;
     });
-    apply_title_bar(hwnd, dark);
+    apply_title_bar(hwnd, pal_for(&shared::config().theme, dark).dark);
     unsafe {
         let _ = ShowWindow(hwnd, if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
         let _ = SetForegroundWindow(hwnd);
@@ -959,8 +974,10 @@ pub fn show_event(o: &Occurrence) {
         v.autoscroll = Some(o.start.naive_local().hour() as i32);
         v.selected = Some(o.key());
     });
-    ensure_range(&shared::config());
-    let h = VIEW.with(|v| v.borrow().hwnd);
+    let cfg = shared::config();
+    ensure_range(&cfg);
+    let (h, dark) = VIEW.with(|v| (v.borrow().hwnd, v.borrow().dark));
+    apply_title_bar(HWND(h as *mut _), pal_for(&cfg.theme, dark).dark);
     unsafe {
         let _ = InvalidateRect(Some(HWND(h as *mut _)), None, false);
     }
@@ -1001,8 +1018,10 @@ pub fn on_snapshot() {
     if !is_visible() {
         return;
     }
-    ensure_range(&shared::config());
-    let h = VIEW.with(|v| v.borrow().hwnd);
+    let cfg = shared::config();
+    ensure_range(&cfg);
+    let (h, dark) = VIEW.with(|v| (v.borrow().hwnd, v.borrow().dark));
+    apply_title_bar(HWND(h as *mut _), pal_for(&cfg.theme, dark).dark);
     unsafe {
         let _ = InvalidateRect(Some(HWND(h as *mut _)), None, false);
     }

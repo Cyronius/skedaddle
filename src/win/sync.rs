@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime};
 
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
-use skedaddle::config::{Config, FeedCfg, TEMPLATE};
+use skedaddle::config::{Config, FeedCfg};
 use skedaddle::expand::{expand, FeedMeta};
 use skedaddle::ical;
 use skedaddle::model::{local_midnight_utc, Occurrence};
@@ -50,7 +50,7 @@ struct Worker {
     hwnd: isize,
     config: Arc<Config>,
     config_error: Option<String>,
-    config_mtime: Option<SystemTime>,
+    config_mtime: Option<Option<SystemTime>>,
     states: Vec<FeedState>,
     agent: Option<ureq::Agent>,
     range: Option<(DateTime<Utc>, DateTime<Utc>)>,
@@ -110,7 +110,7 @@ impl Worker {
             }
             self.post();
             let failing = self.states.iter().any(|s| s.error.is_some());
-            let wait = if failing { StdDuration::from_secs(60) } else { StdDuration::from_secs(self.config.poll_minutes * 60) };
+            let wait = if failing { StdDuration::from_secs(60) } else { StdDuration::from_secs(skedaddle::config::POLL_MINUTES * 60) };
             let deadline = std::time::Instant::now() + wait;
             loop {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -130,16 +130,16 @@ impl Worker {
     fn reload_config(&mut self) -> bool {
         let path = paths::config_file();
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if mtime.is_some() && mtime == self.config_mtime {
+        if self.config_mtime == Some(mtime) {
             return false;
         }
+        self.config_mtime = Some(mtime);
         if mtime.is_none() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&path, TEMPLATE);
+            self.config_error = None;
+            self.config = Arc::new(Config::default());
+            self.states = Vec::new();
+            return true;
         }
-        self.config_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Config::parse(&t)) {
             Ok(c) => {
                 self.config_error = None;

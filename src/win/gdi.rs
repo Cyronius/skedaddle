@@ -58,10 +58,14 @@ pub fn outline(hdc: HDC, r: &RECT, hex: u32, thick: i32) {
 }
 
 pub struct Fonts {
+    pub face: &'static str,
+    pub scale: i32,
     pub regular: HFONT,
     pub bold: HFONT,
     pub small: HFONT,
     pub small_bold: HFONT,
+    pub event: HFONT,
+    pub event_bold: HFONT,
     pub title: HFONT,
     pub big: HFONT,
     pub arrow: HFONT,
@@ -88,21 +92,34 @@ fn font(px: i32, weight: i32, dpi: u32) -> HFONT {
     }
 }
 
-impl Fonts {
-    pub fn new(dpi: u32) -> Fonts {
-        Fonts {
-            regular: font(14, 400, dpi),
-            bold: font(14, 600, dpi),
-            small: font(12, 400, dpi),
-            small_bold: font(12, 600, dpi),
-            title: font(20, 600, dpi),
-            big: font(26, 400, dpi),
-            arrow: font(30, 700, dpi),
+pub fn themed_font(face: &str, px: i32, weight: i32, dpi: u32) -> HFONT {
+    let name = wide(face);
+    unsafe {
+        let f = CreateFontW(-scale(px, dpi), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, PCWSTR(name.as_ptr()));
+        let hdc = GetDC(None);
+        let old = SelectObject(hdc, HGDIOBJ(f.0));
+        let mut buf = [0u16; 64];
+        let n = GetTextFaceW(hdc, Some(&mut buf)).max(0) as usize;
+        SelectObject(hdc, old);
+        ReleaseDC(None, hdc);
+        let got = String::from_utf16_lossy(&buf[..n.min(63)]);
+        if got.trim_end_matches('\0').eq_ignore_ascii_case(face) {
+            f
+        } else {
+            let _ = DeleteObject(HGDIOBJ(f.0));
+            font(px, weight, dpi)
         }
+    }
+}
+
+impl Fonts {
+    pub fn new(dpi: u32, face: &'static str, scale: i32) -> Fonts {
+        let f = |px: i32, weight| themed_font(face, (px * scale + 50) / 100, weight, dpi);
+        Fonts { face, scale, regular: f(14, 400), bold: f(14, 600), small: f(12, 400), small_bold: f(12, 600), event: f(14, 400), event_bold: f(14, 600), title: f(20, 600), big: f(26, 400), arrow: f(30, 700) }
     }
 
     pub fn destroy(&self) {
-        for f in [self.regular, self.bold, self.small, self.small_bold, self.title, self.big, self.arrow] {
+        for f in [self.regular, self.bold, self.small, self.small_bold, self.event, self.event_bold, self.title, self.big, self.arrow] {
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(f.0));
             }
@@ -111,12 +128,17 @@ impl Fonts {
 }
 
 pub fn text(hdc: HDC, s: &str, mut r: RECT, hex: u32, font: HFONT, flags: DRAW_TEXT_FORMAT) {
+    // DrawTextW faults on a zero-length buffer with a dangling pointer.
+    if s.is_empty() {
+        return;
+    }
     let mut buf: Vec<u16> = s.encode_utf16().collect();
     unsafe {
         SelectObject(hdc, HGDIOBJ(font.0));
         SetTextColor(hdc, rgb(hex));
         SetBkMode(hdc, TRANSPARENT);
-        DrawTextW(hdc, &mut buf, &mut r, flags | DT_NOPREFIX);
+        let noclip = if flags.0 & DT_WORDBREAK.0 == 0 { DT_NOCLIP } else { DRAW_TEXT_FORMAT(0) };
+        DrawTextW(hdc, &mut buf, &mut r, flags | DT_NOPREFIX | noclip);
     }
 }
 
@@ -205,9 +227,50 @@ pub fn open_url(url: &str) {
     }
 }
 
-pub fn open_file_in_notepad(path: &std::path::Path) {
-    let p = wide(&format!("\"{}\"", path.display()));
+pub fn ellipse(hdc: HDC, r: &RECT, hex: u32) {
     unsafe {
-        ShellExecuteW(None, w!("open"), w!("notepad.exe"), PCWSTR(p.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+        SetDCBrushColor(hdc, rgb(hex));
+        let old_brush = SelectObject(hdc, GetStockObject(DC_BRUSH));
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = Ellipse(hdc, r.left, r.top, r.right + 1, r.bottom + 1);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+    }
+}
+
+pub fn gear(hdc: HDC, cx: i32, cy: i32, radius: i32, hex: u32, hole_hex: u32) {
+    const TEETH: usize = 8;
+    let step = std::f32::consts::TAU / TEETH as f32;
+    let (inner, outer) = (radius as f32 * 0.74, radius as f32);
+    let mut pts = Vec::with_capacity(TEETH * 4);
+    for k in 0..TEETH {
+        let a = k as f32 * step - step / 2.0;
+        for (r, off) in [(inner, 0.5 - 0.30), (outer, 0.5 - 0.17), (outer, 0.5 + 0.17), (inner, 0.5 + 0.30)] {
+            let t = a + step * off;
+            pts.push(POINT { x: cx + (r * t.cos()).round() as i32, y: cy + (r * t.sin()).round() as i32 });
+        }
+    }
+    unsafe {
+        SetDCBrushColor(hdc, rgb(hex));
+        let old_brush = SelectObject(hdc, GetStockObject(DC_BRUSH));
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = Polygon(hdc, &pts);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+    }
+    let hole = (radius as f32 * 0.32).round() as i32;
+    ellipse(hdc, &rect(cx - hole, cy - hole, cx + hole, cy + hole), hole_hex);
+}
+
+pub fn chevron(hdc: HDC, cx: i32, cy: i32, half_h: i32, left: bool, hex: u32, thick: i32) {
+    let w = half_h * 6 / 10;
+    let (x_tip, x_end) = if left { (cx - w / 2, cx + w / 2) } else { (cx + w / 2, cx - w / 2) };
+    let pts = [POINT { x: x_end, y: cy - half_h }, POINT { x: x_tip, y: cy }, POINT { x: x_end, y: cy + half_h }];
+    unsafe {
+        let pen = CreatePen(PS_SOLID, thick, rgb(hex));
+        let old = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = Polyline(hdc, &pts);
+        SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
     }
 }

@@ -10,13 +10,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::gdi::{self, Fonts};
+use super::theme::Pal;
 use super::{view, WM_APP_MODAL_CLOSED};
 
 const MAX_ROWS: usize = 5;
-const BG: u32 = 0x1F2023;
-const ROW_BG: u32 = 0x2A2C30;
-const TEXT: u32 = 0xF2F2F2;
-const DIM: u32 = 0xA9ADB3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hit {
@@ -29,7 +26,8 @@ struct Modal {
     hwnd: isize,
     main: isize,
     items: Vec<Occurrence>,
-    accent: u32,
+    pal: Pal,
+    text_scale: i32,
     h24: bool,
     feed_colors: Vec<u32>,
     hits: Vec<(RECT, Hit)>,
@@ -58,7 +56,7 @@ pub fn latest_start() -> Option<DateTime<Utc>> {
     MODAL.with(|m| m.borrow().as_ref().and_then(|m| m.items.iter().map(|o| o.start_utc()).max()))
 }
 
-pub fn show(main: HWND, items: Vec<Occurrence>, cfg: &Config) {
+pub fn show(main: HWND, items: Vec<Occurrence>, cfg: &Config, pal: Pal) {
     let existing = MODAL.with(|m| {
         let mut m = m.borrow_mut();
         let Some(modal) = m.as_mut() else { return None };
@@ -91,7 +89,8 @@ pub fn show(main: HWND, items: Vec<Occurrence>, cfg: &Config) {
             hwnd: 0,
             main: main.0 as isize,
             items,
-            accent: parse_color(&cfg.alert.flash_color).unwrap_or(0x2F80ED),
+            pal,
+            text_scale: cfg.text_scale(),
             h24: cfg.clock_24h(),
             feed_colors: cfg.feed.iter().map(|f| parse_color(&f.color).unwrap_or(0x4285F4)).collect(),
             hits: Vec::new(),
@@ -101,7 +100,7 @@ pub fn show(main: HWND, items: Vec<Occurrence>, cfg: &Config) {
         };
         MODAL.with(|m| *m.borrow_mut() = Some(state));
         let ex = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-        let created = CreateWindowExW(ex, w!("skedaddle.modal"), w!("skedaddle alert"), WS_POPUP, work.left, work.top, 10, 10, None, None, Some(hinst), None);
+        let created = CreateWindowExW(ex, w!("skedaddle.modal"), w!("Skedaddle alert"), WS_POPUP, work.left, work.top, 10, 10, None, None, Some(hinst), None);
         let Ok(hwnd) = created else {
             MODAL.with(|m| *m.borrow_mut() = None);
             return;
@@ -156,56 +155,58 @@ fn header_text(items: &[Occurrence]) -> String {
 fn paint(hdc: HDC, rc: RECT, m: &mut Modal) {
     let dpi = m.dpi;
     let sc = |v: i32| gdi::scale(v, dpi);
-    let fonts = m.fonts.get_or_insert_with(|| Fonts::new(dpi));
+    let pal = m.pal;
+    let fonts = m.fonts.get_or_insert_with(|| Fonts::new(dpi, pal.font, m.text_scale));
     let (w, h) = (rc.right, rc.bottom);
-    gdi::fill(hdc, &rc, BG);
+    gdi::fill(hdc, &rc, pal.line);
+    gdi::fill(hdc, &gdi::rect(1, 1, w - 1, h - 1), pal.bg);
     m.hits.clear();
 
     let head = gdi::rect(0, 0, w, sc(52));
-    gdi::fill(hdc, &head, m.accent);
-    gdi::text(hdc, &header_text(&m.items), gdi::rect(sc(20), 0, w - sc(20), sc(52)), 0xFFFFFF, fonts.title, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    gdi::fill(hdc, &head, pal.accent);
+    gdi::text(hdc, &header_text(&m.items), gdi::rect(sc(20), 0, w - sc(20), sc(52)), pal.on_accent, fonts.title, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
     let mut y = sc(52);
     let shown = m.items.len().min(MAX_ROWS);
     for (i, o) in m.items.iter().take(shown).enumerate() {
         let row = gdi::rect(sc(12), y + sc(6), w - sc(12), y + sc(62));
-        gdi::round_fill(hdc, &row, ROW_BG, sc(6));
+        gdi::round_fill(hdc, &row, pal.panel, sc(6));
         let color = m.feed_colors.get(o.feed).copied().unwrap_or(0x4285F4);
         gdi::fill(hdc, &gdi::rect(row.left, row.top + sc(6), row.left + sc(4), row.bottom - sc(6)), color);
 
         let btn_w = if o.join_url.is_some() { sc(84) } else { 0 };
         let text_r = row.right - sc(12) - if btn_w > 0 { btn_w + sc(8) } else { 0 };
-        gdi::text(hdc, &o.title, gdi::rect(row.left + sc(16), row.top + sc(8), text_r, row.top + sc(30)), TEXT, fonts.bold, DT_SINGLELINE | DT_END_ELLIPSIS);
+        gdi::text(hdc, &o.title, gdi::rect(row.left + sc(16), row.top + sc(8), text_r, row.top + sc(30)), pal.text, fonts.bold, DT_SINGLELINE | DT_END_ELLIPSIS);
         let mut when = format!("{} – {}", fmt_time(&o.start, m.h24), fmt_time(&o.end, m.h24));
         if !o.location.is_empty() {
             when.push_str(" · ");
             when.push_str(o.location.lines().next().unwrap_or(""));
         }
-        gdi::text(hdc, &when, gdi::rect(row.left + sc(16), row.top + sc(30), text_r, row.bottom - sc(6)), DIM, fonts.small, DT_SINGLELINE | DT_END_ELLIPSIS);
+        gdi::text(hdc, &when, gdi::rect(row.left + sc(16), row.top + sc(30), text_r, row.bottom - sc(6)), pal.dim, fonts.small, DT_SINGLELINE | DT_END_ELLIPSIS);
 
         if btn_w > 0 {
             let b = gdi::rect(row.right - sc(12) - btn_w, row.top + sc(12), row.right - sc(12), row.bottom - sc(12));
             let hot = m.hover == Some(Hit::Join(i));
-            gdi::round_fill(hdc, &b, if hot { 0x34A853 } else { 0x1E8E3E }, sc(5));
-            gdi::text(hdc, "Join", b, 0xFFFFFF, fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            gdi::round_fill(hdc, &b, if hot { gdi::blend(pal.on_ok, pal.ok, 0.18) } else { pal.ok }, sc(5));
+            gdi::text(hdc, "Join", b, pal.on_ok, fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             m.hits.push((b, Hit::Join(i)));
         }
         y += sc(64);
     }
     if m.items.len() > shown {
         let r = gdi::rect(sc(20), y + sc(4), w - sc(20), y + sc(26));
-        gdi::text(hdc, &format!("+{} more", m.items.len() - shown), r, DIM, fonts.small, DT_SINGLELINE | DT_VCENTER);
+        gdi::text(hdc, &format!("+{} more", m.items.len() - shown), r, pal.dim, fonts.small, DT_SINGLELINE | DT_VCENTER);
     }
 
     let fy = h - sc(60);
     let dismiss = gdi::rect(w - sc(12) - sc(110), fy + sc(12), w - sc(12), fy + sc(48));
     let details = gdi::rect(dismiss.left - sc(8) - sc(100), fy + sc(12), dismiss.left - sc(8), fy + sc(48));
     let hot_d = m.hover == Some(Hit::Dismiss);
-    gdi::round_fill(hdc, &dismiss, if hot_d { 0xE5E7EB } else { 0xFFFFFF }, sc(5));
-    gdi::text(hdc, "Dismiss", dismiss, 0x1F2023, fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    gdi::round_fill(hdc, &dismiss, if hot_d { gdi::blend(pal.bg, pal.text, 0.15) } else { pal.text }, sc(5));
+    gdi::text(hdc, "Dismiss", dismiss, pal.bg, fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     let hot_t = m.hover == Some(Hit::Details);
-    gdi::round_fill(hdc, &details, if hot_t { 0x3A3D42 } else { 0x2F3236 }, sc(5));
-    gdi::text(hdc, "Details", details, TEXT, fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    gdi::round_fill(hdc, &details, gdi::blend(pal.text, pal.panel, if hot_t { 0.22 } else { 0.12 }), sc(5));
+    gdi::text(hdc, "Details", details, pal.text, fonts.bold, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     m.hits.push((dismiss, Hit::Dismiss));
     m.hits.push((details, Hit::Details));
 }

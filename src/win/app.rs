@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use chrono::{Duration, Local, Utc};
 use skedaddle::alerts;
-use skedaddle::config::{parse_color, TEMPLATE};
+use skedaddle::config::{REPEAT_SECONDS, REPEAT_UNTIL_MINUTES};
 use skedaddle::model::{fmt_in, fmt_time, AlertKey, Occurrence, Rsvp};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize};
@@ -17,7 +17,7 @@ use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CON
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::sync::{self, Cmd, Snapshot};
-use super::{autostart, flash, gdi, icon, modal, paths, shared, tray, view, wide};
+use super::{autostart, flash, gdi, icon, install, modal, paths, settings, shared, theme, tray, view, wide};
 use super::{WM_APP_MODAL_CLOSED, WM_APP_SHOW, WM_APP_SNAPSHOT, WM_APP_TRAY};
 
 const ID_ALERT: usize = 1;
@@ -27,10 +27,13 @@ const ID_TRIM: usize = 4;
 
 const MENU_OPEN: usize = 1;
 const MENU_REFRESH: usize = 2;
-const MENU_TEST: usize = 3;
-const MENU_CONFIG: usize = 4;
+const MENU_SETTINGS: usize = 4;
 const MENU_AUTOSTART: usize = 5;
 const MENU_QUIT: usize = 6;
+const MENU_DONATE: usize = 7;
+const MENU_INSTALL: usize = 8;
+
+const DONATE_URL: &str = "https://www.kuaf.com/donate";
 
 struct App {
     seen: HashSet<AlertKey>,
@@ -82,25 +85,27 @@ fn save_seen(seen: &HashSet<AlertKey>) {
 fn tooltip(snap: Option<&Snapshot>) -> (String, bool) {
     let Some(s) = snap else { return ("skedaddle: starting".into(), false) };
     if s.config_error.is_some() {
-        return ("skedaddle: config error. Right-click > Open config file".into(), false);
+        return ("skedaddle: config is damaged. Click to open settings".into(), false);
     }
     if s.feeds.is_empty() {
-        return ("skedaddle: no calendar feeds. Right-click > Open config file".into(), false);
+        return ("skedaddle: no calendars yet. Click to open settings".into(), false);
     }
     let now = Utc::now();
     let stale = s.is_stale(now);
     let h24 = s.config.clock_24h();
+    let live = |o: &&Occurrence| !o.all_day && o.rsvp != Rsvp::Declined && o.end.with_timezone(&Utc) > now;
+    let upcoming = s.occs.iter().filter(live).find(|o| o.start_utc() > now);
+    if let Some(o) = upcoming {
+        let day = if o.start.date_naive() == Local::now().date_naive() { String::new() } else { format!("{} ", o.start.format("%a")) };
+        let tip = format!("Next: {day}{} {} ({})", fmt_time(&o.start, h24), o.title, fmt_in((o.start_utc() - now).num_seconds()));
+        return (tip.chars().take(127).collect(), stale);
+    }
     let mut tip = String::new();
     if stale {
         let since = s.oldest_sync().map(|t| fmt_time(&t.with_timezone(&Local).fixed_offset(), h24)).unwrap_or_else(|| "start".into());
         tip.push_str(&format!("Not synced since {since}\n"));
     }
-    let live = |o: &&Occurrence| !o.all_day && o.rsvp != Rsvp::Declined && o.end.with_timezone(&Utc) > now;
-    let upcoming = s.occs.iter().filter(live).find(|o| o.start_utc() > now);
-    if let Some(o) = upcoming {
-        let day = if o.start.date_naive() == Local::now().date_naive() { String::new() } else { format!("{} ", o.start.format("%a")) };
-        tip.push_str(&format!("Next: {day}{} {} ({})", fmt_time(&o.start, h24), o.title, fmt_in((o.start_utc() - now).num_seconds())));
-    } else if let Some(o) = s.occs.iter().filter(live).next() {
+    if let Some(o) = s.occs.iter().filter(live).next() {
         tip.push_str(&format!("Now: {} (until {})", o.title, fmt_time(&o.end, h24)));
     } else {
         tip.push_str("No upcoming events");
@@ -121,42 +126,29 @@ fn refresh_tray(hwnd: HWND) {
     }
 }
 
-fn play_sound(spec: &str) {
-    match spec {
-        "none" => {}
-        "" | "default" => unsafe {
-            let _ = MessageBeep(MB_ICONEXCLAMATION);
-        },
-        path => {
-            let p = wide(path);
-            unsafe {
-                let _ = PlaySoundW(PCWSTR(p.as_ptr()), None, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
-            }
-        }
+fn play_sound() {
+    unsafe {
+        let _ = MessageBeep(MB_ICONEXCLAMATION);
     }
 }
 
 fn show_alert(hwnd: HWND, items: Vec<Occurrence>) {
     let cfg = shared::config();
-    if cfg.alert.flash {
-        flash::start(parse_color(&cfg.alert.flash_color).unwrap_or(0x2F80ED));
+    let pal = theme::current();
+    flash::start(pal.accent);
+    if cfg.alert.play_sound {
+        play_sound();
     }
-    play_sound(&cfg.alert.sound);
-    modal::show(hwnd, items, &cfg);
-    if cfg.alert.repeat_seconds > 0 {
-        unsafe {
-            SetTimer(Some(hwnd), ID_REPEAT, cfg.alert.repeat_seconds * 1000, None);
-        }
+    modal::show(hwnd, items, &cfg, pal);
+    unsafe {
+        SetTimer(Some(hwnd), ID_REPEAT, REPEAT_SECONDS * 1000, None);
     }
 }
 
 fn repeat(hwnd: HWND) {
-    let cfg = shared::config();
-    let until = modal::latest_start().map(|s| s + Duration::minutes(cfg.alert.repeat_until_minutes));
+    let until = modal::latest_start().map(|s| s + Duration::minutes(REPEAT_UNTIL_MINUTES));
     if modal::is_open() && until.is_some_and(|u| Utc::now() < u) {
-        if cfg.alert.flash {
-            flash::start(parse_color(&cfg.alert.flash_color).unwrap_or(0x2F80ED));
-        }
+        flash::start(theme::current().accent);
     } else {
         unsafe {
             let _ = KillTimer(Some(hwnd), ID_REPEAT);
@@ -202,34 +194,19 @@ fn on_snapshot(hwnd: HWND, snap: Arc<Snapshot>) {
     }
 }
 
-fn test_alert(hwnd: HWND) {
-    let now = Local::now().fixed_offset();
-    let o = Occurrence {
-        feed: 0,
-        uid: format!("test-{}", now.timestamp()),
-        title: "Test alert".into(),
-        start: now,
-        end: now + Duration::minutes(30),
-        all_day: false,
-        location: "Conference room".into(),
-        description: "This is a test of the skedaddle alert.".into(),
-        join_url: Some("https://meet.google.com/".into()),
-        rsvp: Rsvp::None,
-        busy: true,
-    };
-    show_alert(hwnd, vec![o]);
-}
-
 fn menu(hwnd: HWND) {
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return };
         let _ = AppendMenuW(m, MF_STRING, MENU_OPEN, w!("Open calendar"));
         let _ = AppendMenuW(m, MF_STRING, MENU_REFRESH, w!("Refresh now"));
-        let _ = AppendMenuW(m, MF_STRING, MENU_TEST, w!("Test alert"));
-        let _ = AppendMenuW(m, MF_STRING, MENU_CONFIG, w!("Open config file"));
+        let _ = AppendMenuW(m, MF_STRING, MENU_SETTINGS, w!("Settings"));
         let auto = if autostart::is_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(m, auto, MENU_AUTOSTART, w!("Start with Windows"));
+        if !install::is_installed() {
+            let _ = AppendMenuW(m, MF_STRING, MENU_INSTALL, w!("Install Skedaddle\u{2026}"));
+        }
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(m, MF_STRING, MENU_DONATE, w!("\u{2665}  Like this? Tip my local NPR station"));
         let _ = AppendMenuW(m, MF_STRING, MENU_QUIT, w!("Quit"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -240,9 +217,16 @@ fn menu(hwnd: HWND) {
         match cmd.0 as usize {
             MENU_OPEN => view::show(),
             MENU_REFRESH => shared::send(Cmd::Refresh),
-            MENU_TEST => test_alert(hwnd),
-            MENU_CONFIG => gdi::open_file_in_notepad(&paths::config_file()),
+            MENU_SETTINGS => settings::show(),
             MENU_AUTOSTART => autostart::set(!autostart::is_enabled()),
+            MENU_DONATE => gdi::open_url(DONATE_URL),
+            MENU_INSTALL => match install::install_now() {
+                Ok(()) => {
+                    install::launch_installed();
+                    let _ = DestroyWindow(hwnd);
+                }
+                Err(e) => install::error(&e),
+            },
             MENU_QUIT => {
                 let _ = DestroyWindow(hwnd);
             }
@@ -255,7 +239,14 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     match msg {
         WM_APP_TRAY => {
             match (lp.0 & 0xFFFF) as u32 {
-                WM_LBUTTONUP => view::toggle(),
+                WM_LBUTTONUP => {
+                    let setup = shared::snapshot().is_none_or(|s| s.config_error.is_some() || s.feeds.is_empty());
+                    if setup && !view::is_visible() {
+                        settings::show();
+                    } else {
+                        view::toggle();
+                    }
+                }
                 WM_RBUTTONUP => menu(hwnd),
                 _ => {}
             }
@@ -323,24 +314,39 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 pub fn run() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--uninstall") {
+            install::uninstall();
+            return;
+        }
+        let relaunch = args.iter().any(|a| a == "--relaunch");
         let mutex_name = wide(r"Local\skedaddle.single");
-        let _guard = CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        let mut waited = 0;
+        let _guard = loop {
+            let guard = CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()));
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                break guard;
+            }
+            // A relaunch after install starts while the old copy is still exiting.
+            if relaunch && waited < 6000 {
+                if let Ok(h) = guard {
+                    let _ = CloseHandle(h);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                waited += 200;
+                continue;
+            }
             if let Ok(h) = FindWindowW(w!("skedaddle.main"), None) {
                 let _ = PostMessageW(Some(h), WM_APP_SHOW, WPARAM(0), LPARAM(0));
             }
             return;
+        };
+        if install::offer() {
+            return;
         }
 
-        let cfg_path = paths::config_file();
-        if !cfg_path.exists() {
-            if let Some(dir) = cfg_path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            if std::fs::write(&cfg_path, TEMPLATE).is_ok() {
-                gdi::open_file_in_notepad(&cfg_path);
-            }
-        }
+        let first_run = !paths::config_file().exists();
 
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
         let small = GetSystemMetrics(SM_CXSMICON).max(16);
@@ -357,8 +363,9 @@ pub fn run() {
         };
         RegisterClassExW(&wc);
         view::register(hinst, big, icon_ok);
+        settings::register(hinst, big, icon_ok);
 
-        let created = CreateWindowExW(WS_EX_TOOLWINDOW, w!("skedaddle.main"), w!("skedaddle"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, Some(hinst), None);
+        let created = CreateWindowExW(WS_EX_TOOLWINDOW, w!("skedaddle.main"), w!("Skedaddle"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, Some(hinst), None);
         let Ok(hwnd) = created else { return };
 
         APP.with(|a| {
@@ -379,8 +386,15 @@ pub fn run() {
         sync::spawn(hwnd, rx);
         SetTimer(Some(hwnd), ID_TICK, 60_000, None);
 
+        if first_run {
+            settings::show();
+        }
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if settings::pre_translate(&msg) {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
